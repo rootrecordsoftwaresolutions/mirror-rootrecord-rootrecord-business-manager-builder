@@ -11,10 +11,9 @@ CI deploys the Worker and applies D1 migrations when you **push to `main`** (onl
 1. **Create a D1 database** in the [Cloudflare dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **D1** → **Create database** → name it **`rootrecord_license`** (must match `wrangler.toml`).
 2. Open the database → copy **Database ID** → paste into **`cloudflare/wrangler.toml`** as `database_id = "..."` → **commit and push** (this repo must know which DB to migrate).
 3. **API token** (Cloudflare): [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create Token** → use template **Edit Cloudflare Workers** and add **D1: Edit** (or create custom with Workers Scripts:Edit + D1:Edit for your account).
-4. **Account ID**: Cloudflare dashboard → **Workers & Pages** → right sidebar **Account ID** — copy it.
+4. **Account ID** is already set in **`cloudflare/wrangler.toml`** as `account_id` (no GitHub secret for it).
 5. **GitHub** (this repo) → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
    - `CLOUDFLARE_API_TOKEN` — paste the token from step 3  
-   - `CLOUDFLARE_ACCOUNT_ID` — paste from step 4  
    - Optional: `LICENSE_API_SECRET` — long random string; if set, CI runs `wrangler secret put` so the Worker requires `Authorization: Bearer …` (same value in your app config).
 
 6. Push to `main` (or **Actions** → **Deploy license API (Cloudflare)** → **Run workflow**). When green, use the Worker URL from the deploy log (or **Workers & Pages** → **rootrecord-license**).
@@ -24,7 +23,6 @@ CI deploys the Worker and applies D1 migrations when you **push to `main`** (onl
 | Secret | Purpose |
 |--------|---------|
 | `CLOUDFLARE_API_TOKEN` | Deploy Worker + run D1 migrations |
-| `CLOUDFLARE_ACCOUNT_ID` | Wrangler account scope |
 | `LICENSE_API_SECRET` | Optional; syncs Bearer secret for `/v1/entitlement` |
 
 ---
@@ -70,7 +68,7 @@ Success response shape:
 ## Get Account ID + D1 IDs without hunting the dashboard
 
 1. **From the address bar:** when you’re anywhere in the dashboard, the URL often looks like  
-   `https://dash.cloudflare.com/<ACCOUNT_ID>/...` — the first path segment after `.com/` is your **Account ID** (copy that for GitHub `CLOUDFLARE_ACCOUNT_ID`).
+   `https://dash.cloudflare.com/<ACCOUNT_ID>/...` — the first path segment after `.com/` is your **Account ID** (should match `account_id` in `wrangler.toml`).
 
 2. **From the CLI** (after `npm install` in `cloudflare/` and `npx wrangler login` once):  
    `npm run cf:ids` — prints **`wrangler whoami`** (account) and **`wrangler d1 list`** (database names + UUIDs). Use that UUID for `wrangler.toml` if needed; yours may already be set.
