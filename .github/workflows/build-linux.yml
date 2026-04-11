@@ -1,0 +1,40 @@
+# Produces a Linux x64 folder bundle as a tarball artifact (pair with Windows installer on Releases).
+name: Build Linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Tk (GUI stack)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-tk
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: PyInstaller
+        run: python -m PyInstaller --noconfirm build_rootrecord.spec
+
+      - name: Create tarball
+        run: |
+          tar -czvf RootRecord-linux-x64.tar.gz -C dist RootRecord
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RootRecord-linux-x64
+          path: RootRecord-linux-x64.tar.gz

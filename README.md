@@ -133,15 +133,36 @@ cd "…\Root Record Business Manager\build"
 
 Requires Windows SDK (`makeappx.exe`). Partner Center identity placeholders are documented in the script and template.
 
+---
+
+## Linux build (pair with Windows on public Releases)
+
+The same **`build_rootrecord.spec`** runs on Linux (no Windows `version` resource; optional `icon.png` if you add it to the repo or parent workspace).
+
+**Local (Ubuntu / Debian / WSL):**
+
+```bash
+sudo apt-get update && sudo apt-get install -y python3-tk python3-pip
+cd /path/to/Root\ Record\ Business\ Manager
+pip install -r requirements.txt -r requirements-build.txt
+bash build/build_linux.sh
+```
+
+Run the app: `dist/RootRecord/RootRecord` (folder bundle, same pattern as Windows).
+
+**CI:** Pushing to `main` runs **`.github/workflows/build-linux.yml`**, which uploads **`RootRecord-linux-x64.tar.gz`** as a workflow artifact (use it as the Linux asset next to the Windows installer on a Release).
+
+Runtime note: tray/GUI may need extra packages on minimal distros; Wayland vs X11 can affect `pystray`—test on your target desktop.
+
 ### What not to commit
 
-Do not add `dist/`, `build/output/`, or `build/build_rootrecord/` to git—the `.gitignore` already excludes them. The **installer** is what you distribute, not the raw PyInstaller folder (unless you intentionally offer a portable zip).
+Do not add `dist/`, `build/output/`, or `build/build_rootrecord/` to git—the `.gitignore` already excludes them. The **installer** is what you distribute on Windows, not the raw PyInstaller folder (unless you intentionally offer a portable zip). On Linux, ship the **tarball** or the `dist/RootRecord` folder contents.
 
 ---
 
 ## GitHub Releases (publishing installers only)
 
-This repo is configured so **releases attach the Inno installer**, not the whole builder tree.
+This repo is configured so **releases attach the Inno installer** (and optionally the **Linux tarball** from CI), not the whole builder tree.
 
 1. Install **GitHub CLI**: `winget install GitHub.cli`.
 
