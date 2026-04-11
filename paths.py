@@ -11,9 +11,6 @@ _PKG_DIR = Path(__file__).resolve().parent
 # RR Business Operations (repo root in development)
 _WORKSPACE_ROOT = _PKG_DIR.parent.parent
 
-# Set by the desktop UI from the signed-in Firebase account (localId). Leave unset for default layout.
-_desktop_firebase_uid: str | None = None
-
 
 def _rootrecord_home_override() -> Path | None:
     env = os.environ.get("ROOTRECORD_HOME", "").strip()
@@ -34,20 +31,6 @@ def _rootrecord_home_override() -> Path | None:
     return None
 
 
-def sanitize_firebase_uid_for_path(uid: str) -> str:
-    s = "".join(c for c in uid if c.isalnum() or c in "_-")
-    return s or "firebase_uid"
-
-
-def set_desktop_firebase_account_uid(uid: str | None) -> None:
-    """Scope data/, users/, and workspace_root() to this Firebase localId (desktop). Pass None when signed out."""
-    global _desktop_firebase_uid
-    if uid is None or not str(uid).strip():
-        _desktop_firebase_uid = None
-    else:
-        _desktop_firebase_uid = sanitize_firebase_uid_for_path(str(uid))
-
-
 def _frozen_base() -> Path | None:
     if not (getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")):
         return None
@@ -59,17 +42,13 @@ def _frozen_base() -> Path | None:
 
 
 def resolve_app_root() -> Path:
-    """Directory for users/, exports, plugins, and per-account layout roots."""
+    """Directory for users/, exports, plugins, and layout roots."""
     ov = _rootrecord_home_override()
     if ov is not None:
         return ov
     fa = _frozen_base()
     if fa is not None:
-        if _desktop_firebase_uid:
-            return fa / "accounts" / _desktop_firebase_uid
         return fa
-    if _desktop_firebase_uid:
-        return _PKG_DIR / "accounts" / _desktop_firebase_uid
     return _WORKSPACE_ROOT
 
 
@@ -83,11 +62,7 @@ def data_dir() -> Path:
         return ov / "data"
     fa = _frozen_base()
     if fa is not None:
-        if _desktop_firebase_uid:
-            return fa / "accounts" / _desktop_firebase_uid / "data"
         return fa / "data"
-    if _desktop_firebase_uid:
-        return _PKG_DIR / "accounts" / _desktop_firebase_uid / "data"
     return _PKG_DIR / "data"
 
 
@@ -97,11 +72,7 @@ def users_dir() -> Path:
         return ov / "users"
     fa = _frozen_base()
     if fa is not None:
-        if _desktop_firebase_uid:
-            return fa / "accounts" / _desktop_firebase_uid / "users"
         return fa / "users"
-    if _desktop_firebase_uid:
-        return _PKG_DIR / "accounts" / _desktop_firebase_uid / "users"
     return _WORKSPACE_ROOT / "users"
 
 
@@ -126,18 +97,3 @@ def legacy_shared_db_path() -> Path | None:
         return leg if leg.is_file() else None
     p = fa / "data" / "rootrecord.db"
     return p if p.is_file() else None
-
-
-def other_desktop_account_dirs_exist(current_firebase_uid: str) -> bool:
-    """True if another Firebase account already has a folder under accounts/ (excluding current)."""
-    cur = sanitize_firebase_uid_for_path(current_firebase_uid)
-    fa = _frozen_base()
-    if fa is not None:
-        acc = fa / "accounts"
-        if not acc.is_dir():
-            return False
-        return any(p.is_dir() and p.name != cur for p in acc.iterdir())
-    acc = _PKG_DIR / "accounts"
-    if not acc.is_dir():
-        return False
-    return any(p.is_dir() and p.name != cur for p in acc.iterdir())

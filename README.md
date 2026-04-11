@@ -7,6 +7,8 @@
 - **Windows:** Inno **installer** `.exe` (primary, tested).
 - **Linux (optional):** **tarball** of the PyInstaller folder bundle—treat as **best-effort** (see below).
 
+**Pushing to GitHub:** `git push`, **GitHub Actions** (`.github/workflows/build-linux.yml`), and **`build/publish_github_release.ps1`** are unchanged. The app no longer includes an **in-app “check GitHub for a newer installer”** updater; distributing updates is via your normal **Releases** workflow (installer + optional Linux tarball), not from inside the running app.
+
 ---
 
 ## Platform status (read this first)
@@ -14,20 +16,20 @@
 | Platform | Role in this project | Testing / confidence |
 |----------|----------------------|----------------------|
 | **Windows** | **Primary** target. Daily use, installer, SmartScreen/signing notes, most UI paths. | **High** — this is what you build and run day to day. |
-| **Linux** | **Secondary / experimental.** Same Python codebase and `build_rootrecord.spec`, but **not** used as the main desktop in this workflow. | **Low — mostly untested.** The spec and a **GitHub Actions** job prove “it builds on Ubuntu.” That is **not** the same as validating every screen, Firebase, cloud backup, tray, PDF export, plugins, or edge cases on real distros. |
+| **Linux** | **Secondary / experimental.** Same Python codebase and `build_rootrecord.spec`, but **not** used as the main desktop in this workflow. | **Low — mostly untested.** The spec and a **GitHub Actions** job prove “it builds on Ubuntu.” That is **not** the same as validating every screen, tray, PDF export, plugins, or edge cases on real distros. |
 
 ### Linux disclaimer (important)
 
 - The **Linux artifact exists so you can pair a tarball with the Windows `.exe` on a public Release**, not because Linux is a fully supported tier yet.
 - **CI** (`ubuntu-latest`) only verifies **PyInstaller completes** and packages **`RootRecord-linux-x64.tar.gz`**. It does **not** launch the GUI in a headed environment or run an automated test suite.
-- Expect **rough edges**: system **Tk** packages, **Wayland vs X11**, **tray (`pystray`)**, **keyring**, fonts, and file paths may differ from Windows. Some features (e.g. **start-on-login** via Windows registry) have **no Linux equivalent** in-tree unless you add them later.
-- **Before** advertising Linux on a public repo, plan a **manual smoke test** on at least one real machine (e.g. Ubuntu LTS desktop): install deps, extract tarball, run `./RootRecord`, clock in/out, open reports, try Firebase if you care.
+- Expect **rough edges**: system **Tk** packages, **Wayland vs X11**, **tray (`pystray`)**, fonts, and file paths may differ from Windows. Some features (e.g. **start-on-login** via Windows registry) have **no Linux equivalent** in-tree unless you add them later.
+- **Before** advertising Linux on a public repo, plan a **manual smoke test** on at least one real machine (e.g. Ubuntu LTS desktop): install deps, extract tarball, run `./RootRecord`, clock in/out, open reports.
 
 ---
 
 ## What the product is
 
-**RootRecord Business Manager (Beta)** is a Python desktop application using **CustomTkinter**. It covers time tracking, money/clients/inventory-style workflows, reporting (e.g. ReportLab, Matplotlib), optional **Firebase Auth** and **encrypted full-database cloud backup** to Firebase Storage, plugins (e.g. power monitoring, USGS earthquake), and system tray behavior (`pystray`).
+**RootRecord Business Manager (Beta)** is a Python desktop application using **CustomTkinter**. It covers time tracking, money/clients/inventory-style workflows, reporting (ReportLab, Matplotlib), **local SQLite** storage, optional plugins (e.g. power monitoring, USGS earthquake), and system tray behavior (`pystray`). **Cloud sign-in, Firebase, Stripe/trial gating, and in-app GitHub update checks are not part of this codebase**—ship licensing or distribution however you want outside the app.
 
 The main UI and logic live largely in `ui_main.py`, with data access in `data_api.py`, `db.py`, `storage.py`, migrations in `migrations.py`, and domain rules in `tracking_core.py`, `suite_data.py`, etc.
 
@@ -45,10 +47,8 @@ The main UI and logic live largely in `ui_main.py`, with data access in `data_ap
 | Language | Python 3.12 recommended (match CI / local builders). |
 | UI | `customtkinter` (needs **Tk** at runtime; on Linux install `python3-tk` or your distro’s equivalent). |
 | PDF / charts | `reportlab`, `matplotlib` |
-| HTTP | `httpx` |
-| Secrets / OS store | `keyring`, `python-dotenv` |
-| Crypto | `cryptography` |
-| Google / Firebase | `google-auth`, `google-auth-oauthlib`; Firebase in `firebase_*.py` |
+| HTTP | `httpx` (plugins / external APIs) |
+| Config | `python-dotenv` (optional `.env`) |
 | Tray | `pystray` (can be finicky on Linux Wayland). |
 | Local DB | SQLite (`rootrecord.db` under app data—see paths below). |
 
@@ -62,9 +62,10 @@ Dependencies: `requirements.txt` (runtime) and `requirements-build.txt` (PyInsta
 |--------|------------------|----------------|
 | Default app data root | `%LOCALAPPDATA%\RootRecord` | `~/.rootrecord` |
 | Override | Env `ROOTRECORD_HOME` and/or registry-backed `ROOTRECORD_HOME` (see `paths.py`) | Env `ROOTRECORD_HOME` |
-| Per-Firebase UID | Under `…/accounts/<uid>/` when signed in | Same relative layout under `~/.rootrecord` |
 
-Development mode (not frozen) still resolves workspace paths from `paths.py` as before.
+Development mode (not frozen) resolves workspace paths from `paths.py` as documented there.
+
+**Backups:** Database backups are **local** (see Program Settings → backup folder). There is no cloud sync in-app.
 
 ---
 
@@ -75,9 +76,8 @@ Development mode (not frozen) still resolves workspace paths from `paths.py` as 
 | `desktop_app.py` | Loads env, launches UI |
 | `ui_main.py` | Main window and most features |
 | `app_version.py` | **`APP_VERSION`** — single source for shipped version in-app |
-| `paths.py` | App data roots, `ROOTRECORD_HOME`, per-Firebase UID scoping |
-| `db.py`, `data_api.py`, `migrations.py`, `schema.sql` | Database layer |
-| `firebase_auth_client.py`, `firebase_cloud_backup.py`, `firebase_embedded.py` | Cloud auth and backup |
+| `paths.py` | App data roots, `ROOTRECORD_HOME` |
+| `db.py`, `data_api.py`, `migrations.py` | Database layer |
 | `build_rootrecord.spec` | **Shared** PyInstaller spec (Windows version resource only on Windows) |
 | `build/build_windows.ps1` | Windows: PyInstaller + Inno installer |
 | `build/build_linux.sh` | Linux/WSL: PyInstaller only |
@@ -85,8 +85,7 @@ Development mode (not frozen) still resolves workspace paths from `paths.py` as 
 | `build/build_msix.ps1` | Optional MSIX (Windows / Store) |
 | `build/publish_github_release.ps1` | Upload **Windows installer** to GitHub Releases via `gh` |
 | `.github/workflows/build-linux.yml` | CI: build Linux tarball artifact (no GUI test) |
-| `firebase/FIREBASE_SETUP.md` | Firebase / OAuth / linking |
-| `.env.example` | Template — copy to `.env` (gitignored) |
+| `.env.example` | Template — copy to `.env` (gitignored); optional `SQLITE_PATH` |
 
 Ignored by git: `.gitignore` covers `dist/`, `build/output/`, `build/build_rootrecord/`, `build/msix/_stage/`, `.env`, venvs, local DBs under `data/`, etc.
 
@@ -102,7 +101,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-# edit .env
+# edit .env if needed (optional SQLITE_PATH)
 python desktop_app.py
 ```
 
@@ -114,7 +113,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env
 sudo apt-get install -y python3-tk   # Debian/Ubuntu — required for Tk/CustomTkinter
 python desktop_app.py
 ```
@@ -123,7 +121,7 @@ python desktop_app.py
 
 ## Versioning (before any release)
 
-1. **`app_version.py`** — set `APP_VERSION` (e.g. `"1.3.22"`).
+1. **`app_version.py`** — set `APP_VERSION` (e.g. `"1.3.24"`).
 2. **`build/rootrecord.iss`** — `#define MyAppVersion` must match (Windows installer).
 3. **MSIX** (if used) — `build/build_msix.ps1` derives version from `app_version.py`.
 4. **Commit and tag** so GitHub Releases and CI builds align with source.
@@ -169,7 +167,7 @@ Requires Windows SDK (`makeappx.exe`). See script and `build/msix/` templates.
 
 ### Windows: what to ship
 
-- **End users:** the **Inno installer** `.exe** from `build\output\`.
+- **End users:** the **Inno installer** `.exe` from `build\output\`.
 - The raw `dist\RootRecord\` folder is optional (portable-style); not required if you only publish the installer.
 
 ---
@@ -219,13 +217,13 @@ This confirms **build reproducibility on a clean Ubuntu image**, not product QA.
 ### Linux: known gaps / risks
 
 - **Tray** and **global shortcuts** may behave differently; Wayland may need extra packages or fall back poorly.
-- **OAuth / browser** flows for Google may differ from Windows.
-- **Keyring** backends vary; failures may push you toward file-based secrets only on some setups.
 - **No** Linux “installer” in this repo yet—only tarball/portable folder.
 
 ---
 
 ## GitHub Releases (Windows + optional Linux)
+
+**Uploading to GitHub** (source + assets) is done with **git** and **GitHub CLI**—not affected by removing in-app update checks.
 
 ### Windows installer (scripted)
 
@@ -247,18 +245,10 @@ Uses `APP_VERSION` from `app_version.py`, tag `v<version>`, SHA256 in notes. Fla
 
 1. Create the release (draft or publish) with the Windows asset as you already do.
 2. Download **`RootRecord-linux-x64.tar.gz`** from the **Actions** workflow artifact (successful run on the same commit/tag).
-3. **Manually upload** the Linux tarball to that Release on GitHub (same tag, e.g. `v1.3.22`).
+3. **Manually upload** the Linux tarball to that Release on GitHub (same tag, e.g. `v1.3.24`).
 4. In the release description, state clearly that **Linux is minimally tested** and list requirements (`python3-tk`, glibc-ish x64, etc.).
 
 Keeping version parity: use the **same tag** for both files; CI and local Linux builds should use the same `app_version.py` commit.
-
----
-
-## Cloud / Firebase
-
-- **Auth:** email/password and Google linking — see `firebase_auth_client.py` and **`firebase/FIREBASE_SETUP.md`**.
-- **Backup:** encrypted DB snapshot — `firebase_cloud_backup.py` (includes operational notes).
-- **Secrets:** prefer `.env`; do not commit live `firebase_embedded.py` credentials.
 
 ---
 
@@ -272,8 +262,7 @@ Keeping version parity: use the **same tag** for both files; CI and local Linux 
 
 ## Security checklist (internal)
 
-- [ ] `.env` never committed; rotate leaked keys.
-- [ ] `firebase_embedded.py` — no irrecoverable secrets in git history if avoidable.
+- [ ] `.env` never committed if it contains machine-specific paths you do not want shared.
 - [ ] Windows installer: **Authenticode** for SmartScreen (see `build/rootrecord.iss` comments).
 - [ ] `gh` token stored in OS credential store — protect machine access.
 
@@ -297,7 +286,6 @@ Keeping version parity: use the **same tag** for both files; CI and local Linux 
 | PyInstaller fails on CI but not locally | Pin Python version in Actions; compare `requirements.txt` lock. |
 | App starts but no window | Display / Wayland; try X11 session; check `DISPLAY` / WSLg. |
 | Tray missing | Wayland / AppIndicator packages; may be unsupported — document limitation. |
-| Firebase / keyring errors | Linux keyring daemon; fall back to testing with `.env` only. |
 
 ### Releases / git
 

@@ -15,13 +15,14 @@
 ; Display name includes Beta. Install dir may differ from older builds — TryGetExistingInstallDir checks legacy paths.
 #define MyAppName "RootRecord Business Manager (Beta)"
 #define MyAppDirName "Root Record\RootRecord Business Manager (Beta)"
-#define MyAppVersion "1.3.22"
+#define MyAppVersion "1.3.24"
 #define MyAppPublisher "RootRecord"
 #define MyAppCopyright "Copyright (C) 2026 RootRecord"
 #define MyAppId "{{A7B2E9F1-4C3D-5E6F-8091-2B3C4D5E6F70}"
 #define MyAppExeName "RootRecord.exe"
 #define DistDir "..\\dist\\RootRecord"
 #define MyAppInstallerIcon "..\\..\\..\\favicon.ico"
+; Installer side art: Inno expects 164x314 (large) and 55x55 (small) — see build/branding/
 #define MyWizardLargeBmp "branding\\wizard-large.bmp"
 #define MyWizardSmallBmp "branding\\wizard-small.bmp"
 
@@ -634,10 +635,11 @@ var
   ContentLeft: Integer;
   ContentWidth: Integer;
 begin
-  { Keep the large branding panel visible on all pages, not just welcome/finish. }
+  { Large = left panel (wizard-large.bmp); small = top-right (wizard-small.bmp). }
   WizardForm.WizardBitmapImage.Visible := True;
   WizardForm.WizardBitmapImage.SendToBack();
-  WizardForm.WizardSmallBitmapImage.Visible := False;
+  WizardForm.WizardSmallBitmapImage.Visible := True;
+  WizardForm.WizardSmallBitmapImage.BringToFront();
 
   if CurPageID = wpFinished then
   begin

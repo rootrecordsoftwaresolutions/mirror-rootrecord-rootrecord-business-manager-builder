@@ -9,3 +9,4 @@ dist/
 build/output/
 build/build_rootrecord/
 build/msix/_stage/
+.firebase/

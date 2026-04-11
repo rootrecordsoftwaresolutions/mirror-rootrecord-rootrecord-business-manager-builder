@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from paths import data_dir, legacy_shared_db_path, other_desktop_account_dirs_exist
+from paths import data_dir, legacy_shared_db_path
 
 log = logging.getLogger("time_tracker.db")
 
@@ -30,18 +30,16 @@ def default_db_path() -> Path:
     return data_dir() / "rootrecord.db"
 
 
-def maybe_migrate_legacy_desktop_db(firebase_uid: str) -> None:
+def maybe_migrate_legacy_desktop_db() -> None:
     """
-    First desktop account on an upgraded install: copy legacy shared rootrecord.db into
-    this account's folder once. Skip if another account folder already exists or the new DB exists.
+    Upgraded install: copy legacy shared rootrecord.db into the current data folder once
+    if the destination database does not exist yet.
     """
     dest = default_db_path()
     if dest.is_file():
         return
     leg = legacy_shared_db_path()
     if leg is None or not leg.is_file():
-        return
-    if other_desktop_account_dirs_exist(firebase_uid):
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(leg, dest)

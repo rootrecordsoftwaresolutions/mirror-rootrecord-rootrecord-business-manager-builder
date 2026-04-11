@@ -1,4 +1,5 @@
 # Produces a Linux x64 folder bundle as a tarball artifact (pair with Windows installer on Releases).
+# Unrelated to the removed in-app "check GitHub for updates" feature — this workflow only builds and uploads CI artifacts.
 name: Build Linux
 
 on:

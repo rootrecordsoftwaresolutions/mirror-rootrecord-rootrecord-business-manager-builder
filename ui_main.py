@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import math
 import sys
 import json
 from typing import Any
@@ -243,6 +244,8 @@ class RootRecordApp(ctk.CTk):
         self._last_activity_desc = ""
         self._active_prompt_popup: ctk.CTkToplevel | None = None
         self._prompt_job_id: str | None = None
+        # Single deferred "show check-in soon" callback from _resume_prompts_if_working_now (avoid stacking).
+        self._prompt_immediate_job: str | None = None
         self._tray_icon = None
         self._tray_icon_running = False
         self.title("RootRecord Business Manager")
@@ -440,13 +443,10 @@ class RootRecordApp(ctk.CTk):
         self._build_help()
         self._build_settings()
         self._switch_nav("Dashboard")
-        self.after(120, self._enforce_signin_gate_on_startup)
 
         foot = ctk.CTkFrame(self, height=28, fg_color="transparent")
         foot.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
-        self._foot_var = tk.StringVar(
-            value=f"Data: {cfg.db_path}  ·  Workspace: {workspace_root()}"
-        )
+        self._foot_var = tk.StringVar(value=_data_footer_line(cfg))
         ctk.CTkLabel(foot, textvariable=self._foot_var, font=ctk.CTkFont(size=11), text_color="gray").pack(
             anchor="w"
         )
@@ -458,7 +458,6 @@ class RootRecordApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.bind("<Unmap>", self._on_window_unmap)
         self._schedule_dashboard_clock_live_refresh()
-        self.after(120_000, self._auto_cloud_sync_tick)
 
     def _apply_app_icon(self) -> None:
         candidates: list[Path] = []
@@ -597,21 +596,6 @@ class RootRecordApp(ctk.CTk):
                         f"Could not clock out before closing:\n{exc}",
                     )
                     return
-        try:
-            if bool(settings_get(self.cfg, "auto_cloud_sync_on_close_enabled", True)):
-                import firebase_auth_client as fb
-                import firebase_cloud_backup as fb_cloud
-
-                if fb.firebase_configured() and fb.is_signed_in():
-                    self._set_process_status("Saving to cloud…", auto_clear_ms=None)
-                    db_path = Path(self.cfg.db_path).resolve()
-                    result = fb_cloud.run_cloud_sync(db_path)
-                    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    settings_set(self.cfg, "last_cloud_sync_utc", now)
-                    settings_set(self.cfg, "last_cloud_sync_object", result.detail)
-                    settings_set(self.cfg, "last_cloud_sync_mode", result.mode)
-        except Exception:
-            pass
         settings_set(self.cfg, "last_app_closed_utc", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self._stop_tray_icon()
         self.destroy()
@@ -1146,7 +1130,11 @@ class RootRecordApp(ctk.CTk):
             self._multi_business_enabled_var.set(bool(multi_business_enabled(self.cfg)))
         if hasattr(self, "_profile_switch_menu"):
             self._refresh_business_profiles_ui()
-        self._refresh_cloud_account_ui()
+        self._refresh_account_local_paths()
+
+    def _refresh_account_local_paths(self) -> None:
+        if getattr(self, "_account_local_db_label", None):
+            self._account_local_db_label.configure(text=str(Path(self.cfg.db_path).resolve()))
 
     def _build_account(self) -> None:
         t = self.tabview.tab("Account Settings")
@@ -1157,10 +1145,11 @@ class RootRecordApp(ctk.CTk):
         )
         ctk.CTkLabel(
             scroll,
-            text="Cloud account and sync tools are shown here.",
+            text="Business profiles, local database path, and invoice/business details.",
             text_color="gray",
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", pady=(0, 8), padx=8)
+
         content = ctk.CTkFrame(scroll, fg_color="transparent")
         content.pack(fill="x", expand=True, padx=8, pady=(2, 0))
         content.grid_columnconfigure(0, weight=1, uniform="acct")
@@ -1170,108 +1159,6 @@ class RootRecordApp(ctk.CTk):
         left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
         right_col = ctk.CTkFrame(content, fg_color="transparent")
         right_col.grid(row=0, column=1, sticky="nsew", padx=(0, 4))
-
-        self._cloud_status_label = ctk.CTkLabel(
-            left_col,
-            text="",
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-            justify="left",
-            wraplength=430,
-        )
-        self._cloud_status_label.pack(anchor="w", pady=(0, 8))
-        auth_row = ctk.CTkFrame(left_col, fg_color="transparent")
-        auth_row.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(
-            auth_row,
-            text="Google account sync status",
-            text_color="gray",
-            font=ctk.CTkFont(size=11),
-        ).pack(side="left", padx=(0, 10))
-        self._cloud_sign_in_btn = ctk.CTkButton(
-            auth_row,
-            text="Sign in",
-            width=90,
-            command=self._open_cloud_login_dialog,
-        )
-        self._cloud_sign_in_btn.pack(side="left", padx=(0, 6))
-        self._cloud_sign_out_btn = ctk.CTkButton(auth_row, text="Sign out", width=90, command=self._cloud_sign_out)
-        self._cloud_sign_out_btn.pack(side="left", padx=6)
-
-        self._auth_providers_label = ctk.CTkLabel(
-            left_col,
-            text="",
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-            justify="left",
-            wraplength=430,
-        )
-        self._auth_providers_label.pack(anchor="w", pady=(0, 6))
-        link_google_row = ctk.CTkFrame(left_col, fg_color="transparent")
-        link_google_row.pack(anchor="w", pady=(0, 10))
-        self._link_google_btn = ctk.CTkButton(
-            link_google_row,
-            text="Link Google account",
-            width=200,
-            command=self._link_google_account_now,
-        )
-        self._link_google_btn.pack(side="left", padx=(0, 8))
-        self._add_help_bubble(
-            link_google_row,
-            "Adds Google sign-in to your current Firebase user so you can use either email/password or Google. "
-            "If Google sign-in fails, ensure a Desktop OAuth client is configured (see firebase/FIREBASE_SETUP.md).",
-        )
-
-        ctk.CTkLabel(left_col, text="Cloud sync", font=ctk.CTkFont(size=16, weight="bold")).pack(
-            anchor="w", pady=(6, 4)
-        )
-        self._cloud_sync_last_label = ctk.CTkLabel(
-            left_col,
-            text="",
-            text_color="gray",
-            font=ctk.CTkFont(size=11),
-            justify="left",
-            wraplength=430,
-        )
-        self._cloud_sync_last_label.pack(anchor="w", pady=(0, 4))
-        sync_row = ctk.CTkFrame(left_col, fg_color="transparent")
-        sync_row.pack(anchor="w", pady=(0, 12))
-        ctk.CTkButton(sync_row, text="Sync database to cloud", width=210, command=self._cloud_sync_now).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(sync_row, text="Restore from cloud", width=150, command=self._restore_from_cloud_now).pack(
-            side="left"
-        )
-        self._add_help_bubble(
-            sync_row,
-            "Sync uploads an encrypted copy of your local database. If Firebase Storage is unavailable, "
-            "only a small metadata record is written to Firestore (shown in Last cloud sync). "
-            "Restore downloads the newest Storage backup and replaces your local file (same Windows profile only).",
-        )
-        self._auto_cloud_sync_var = tk.BooleanVar(value=bool(settings_get(self.cfg, "auto_cloud_sync_enabled", True)))
-        ac1 = ctk.CTkFrame(left_col, fg_color="transparent")
-        ac1.pack(anchor="w", pady=(0, 4))
-        ctk.CTkSwitch(
-            ac1,
-            text="Automatic cloud backup (every ~45 min while app is open)",
-            variable=self._auto_cloud_sync_var,
-            onvalue=True,
-            offvalue=False,
-            command=self._on_toggle_auto_cloud_sync,
-        ).pack(side="left")
-        self._auto_cloud_sync_close_var = tk.BooleanVar(
-            value=bool(settings_get(self.cfg, "auto_cloud_sync_on_close_enabled", True))
-        )
-        ac2 = ctk.CTkFrame(left_col, fg_color="transparent")
-        ac2.pack(anchor="w", pady=(0, 12))
-        ctk.CTkSwitch(
-            ac2,
-            text="Sync database to cloud when closing the app",
-            variable=self._auto_cloud_sync_close_var,
-            onvalue=True,
-            offvalue=False,
-            command=self._on_toggle_auto_cloud_sync_close,
-        ).pack(side="left")
 
         self._multi_business_enabled_var = tk.BooleanVar(value=bool(multi_business_enabled(self.cfg)))
         mb_row = ctk.CTkFrame(left_col, fg_color="transparent")
@@ -1367,7 +1254,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkButton(right_col, text="Save Account Settings", width=180, command=self._save_account_settings).pack(
             anchor="w", pady=(12, 8)
         )
-        self._refresh_cloud_account_ui()
+        self._refresh_account_local_paths()
 
     def _save_account_settings(self) -> None:
         self._set_process_status("Saving account settings...", auto_clear_ms=None)
@@ -1458,422 +1345,14 @@ class RootRecordApp(ctk.CTk):
         self._refresh_business_profiles_ui()
         self._refresh_all_business_scoped_views()
 
-    def _refresh_cloud_account_ui(self) -> None:
-        if getattr(self, "_account_local_db_label", None):
-            self._account_local_db_label.configure(text=str(Path(self.cfg.db_path).resolve()))
-        if not getattr(self, "_cloud_status_label", None):
-            return
-        try:
-            import firebase_auth_client as fb
-        except ImportError:
-            self._cloud_status_label.configure(text="Cloud account features are not included in this build.")
-            return
-        if not fb.firebase_configured():
-            self._cloud_status_label.configure(text="Cloud account is not configured in this build.")
-            return
-        email = fb.current_account_email() or ""
-        tok: str | None = None
-        if fb.is_signed_in():
-            self._cloud_status_label.configure(text=f"Signed in as {email}" if email else "Signed in")
-            if getattr(self, "_cloud_sign_out_btn", None):
-                self._cloud_sign_out_btn.configure(state="normal")
-            if getattr(self, "_cloud_sign_in_btn", None):
-                self._cloud_sign_in_btn.configure(state="disabled")
-            self._apply_signin_continuity_if_needed()
-            tok = fb.get_valid_id_token()
-        else:
-            self._cloud_status_label.configure(text="Not signed in.")
-            if getattr(self, "_cloud_sign_out_btn", None):
-                self._cloud_sign_out_btn.configure(state="disabled")
-            if getattr(self, "_cloud_sign_in_btn", None):
-                self._cloud_sign_in_btn.configure(state="normal")
-        summary_cache: dict[str, Any] | None = None
-        if tok:
+    def _cancel_prompt_immediate_job(self) -> None:
+        jid = getattr(self, "_prompt_immediate_job", None)
+        if jid:
             try:
-                summary_cache = fb.firebase_auth_summary_from_id_token(tok)
-            except Exception:
-                summary_cache = None
-        if getattr(self, "_auth_providers_label", None):
-            if tok and summary_cache is not None:
-                labs = summary_cache.get("linked_labels") or []
-                self._auth_providers_label.configure(
-                    text="Sign-in methods: " + (", ".join(labs) if labs else "(loading…)")
-                )
-            elif tok:
-                self._auth_providers_label.configure(text="Sign-in methods: (could not load)")
-            else:
-                self._auth_providers_label.configure(text="Sign-in methods: —")
-        if getattr(self, "_link_google_btn", None):
-            if not fb.google_oauth_configured():
-                self._link_google_btn.configure(state="disabled", text="Link Google (configure OAuth client)")
-            elif not fb.is_signed_in() or not tok:
-                self._link_google_btn.configure(state="disabled", text="Link Google account")
-            elif summary_cache is not None:
-                pids = summary_cache.get("provider_ids") or []
-                g_ok = ("google.com" in pids) or fb.google_account_linked_in_jwt(tok)
-                if g_ok:
-                    self._link_google_btn.configure(state="disabled", text="Google already linked")
-                else:
-                    self._link_google_btn.configure(state="normal", text="Link Google account")
-            else:
-                g_ok = fb.google_account_linked_in_jwt(tok) if tok else False
-                self._link_google_btn.configure(
-                    state="disabled" if g_ok else "normal",
-                    text="Google already linked" if g_ok else "Link Google account",
-                )
-        if getattr(self, "_cloud_sync_last_label", None):
-            last = str(settings_get(self.cfg, "last_cloud_sync_utc", "") or "").strip()
-            obj = str(settings_get(self.cfg, "last_cloud_sync_object", "") or "").strip()
-            if last:
-                mode = str(settings_get(self.cfg, "last_cloud_sync_mode", "") or "").strip()
-                mode_note = ""
-                if mode == "firestore_fallback":
-                    mode_note = "\n(Metadata only — full database was not uploaded to Storage.)"
-                elif mode == "storage":
-                    mode_note = "\n(Full encrypted database uploaded to Firebase Storage.)"
-                s = f"Last cloud sync: {last[:19].replace('T', ' ')} UTC{mode_note}"
-                if obj:
-                    s += f"\nPath: {obj}"
-                self._cloud_sync_last_label.configure(text=s)
-            else:
-                self._cloud_sync_last_label.configure(text="No cloud sync yet.")
-
-    def _on_toggle_auto_cloud_sync(self) -> None:
-        settings_set(self.cfg, "auto_cloud_sync_enabled", bool(self._auto_cloud_sync_var.get()))
-
-    def _on_toggle_auto_cloud_sync_close(self) -> None:
-        settings_set(self.cfg, "auto_cloud_sync_on_close_enabled", bool(self._auto_cloud_sync_close_var.get()))
-
-    def _auto_cloud_sync_interval_ms(self) -> int:
-        m = int(settings_get(self.cfg, "auto_cloud_sync_interval_minutes", 45))
-        m = max(15, min(24 * 60, m))
-        return m * 60 * 1000
-
-    def _auto_cloud_sync_tick(self) -> None:
-        """Periodic encrypted database upload when cloud backup is enabled."""
-        try:
-            import firebase_auth_client as fb
-            import firebase_cloud_backup as fb_cloud
-
-            if (
-                fb.firebase_configured()
-                and fb.is_signed_in()
-                and bool(settings_get(self.cfg, "auto_cloud_sync_enabled", True))
-            ):
-                db_path = Path(self.cfg.db_path).resolve()
-                result = fb_cloud.run_cloud_sync(db_path)
-                now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                settings_set(self.cfg, "last_cloud_sync_utc", now)
-                settings_set(self.cfg, "last_cloud_sync_object", result.detail)
-                settings_set(self.cfg, "last_cloud_sync_mode", result.mode)
-                if getattr(self, "_cloud_sync_last_label", None):
-                    self._refresh_cloud_account_ui()
-        except Exception:
-            pass
-        self.after(self._auto_cloud_sync_interval_ms(), self._auto_cloud_sync_tick)
-
-    def _link_google_account_now(self) -> None:
-        try:
-            import firebase_auth_client as fb
-        except ImportError:
-            messagebox.showerror("RootRecord Business Manager", "Cloud features are not available in this build.")
-            return
-        if not fb.firebase_configured():
-            messagebox.showinfo("RootRecord Business Manager", "Firebase is not configured.")
-            return
-        if not fb.google_oauth_configured():
-            messagebox.showinfo(
-                "RootRecord Business Manager",
-                "Google OAuth is not configured. Add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET "
-                "(Desktop app client from Google Cloud, same project as Firebase). See firebase/FIREBASE_SETUP.md.",
-            )
-            return
-        if not fb.is_signed_in():
-            messagebox.showinfo("RootRecord Business Manager", "Sign in with email and password first.")
-            return
-        try:
-            self._set_process_status("Linking Google (browser will open)…", auto_clear_ms=None)
-            fb.link_google_to_current_user()
-            self._set_process_status("Google account linked.", auto_clear_ms=2400)
-            messagebox.showinfo(
-                "RootRecord Business Manager",
-                "Google is linked to this account. You can sign in with either email/password or Google.",
-            )
-            self._refresh_cloud_account_ui()
-        except Exception as exc:  # noqa: BLE001
-            self._set_process_status("Could not link Google.", auto_clear_ms=3000)
-            messagebox.showerror("RootRecord Business Manager", str(exc))
-
-    def _cloud_sign_out(self) -> None:
-        self._capture_signout_continuity()
-        try:
-            import firebase_auth_client as fb
-            from paths import set_desktop_firebase_account_uid
-        except ImportError:
-            return
-        fb.clear_stored_credentials()
-        settings_set(self.cfg, "firebase_account_email", "")
-        set_desktop_firebase_account_uid(None)
-        messagebox.showinfo(
-            "RootRecord Business Manager",
-            "You have been signed out. The application will restart to use shared local data paths.",
-        )
-        _restart_rootrecord_app()
-
-    def _open_cloud_login_dialog(self, *, hide_main: bool = False) -> None:
-        try:
-            import firebase_auth_client as fb
-        except ImportError:
-            messagebox.showerror("RootRecord Business Manager", "Cloud sign-in is not available in this build.")
-            return
-        if not fb.firebase_configured():
-            messagebox.showinfo("RootRecord Business Manager", "Cloud sign-in is not configured in this build.")
-            return
-        top = ctk.CTkToplevel(self)
-        top.title("Cloud Sign In")
-        self._apply_window_icon(top)
-        top.geometry("620x390")
-        top.minsize(560, 360)
-        top.transient(self)
-        top.grab_set()
-        if hide_main:
-            try:
-                self.withdraw()
+                self.after_cancel(jid)
             except Exception:
                 pass
-
-        def _cancel_login() -> None:
-            try:
-                top.destroy()
-            except Exception:
-                pass
-            if hide_main:
-                self.destroy()
-
-        top.protocol("WM_DELETE_WINDOW", _cancel_login)
-
-        frm = ctk.CTkFrame(top)
-        frm.pack(fill="both", expand=True, padx=16, pady=16)
-        ctk.CTkLabel(frm, text="Welcome back to RootRecord", font=ctk.CTkFont(size=24, weight="bold")).pack(
-            anchor="w", pady=(0, 8)
-        )
-        ctk.CTkLabel(
-            frm,
-            text="Sign in to continue.\nAfter a successful sign-in, RootRecord restarts once so your data can use your account folder.",
-            text_color="gray",
-            justify="left",
-            wraplength=560,
-            font=ctk.CTkFont(size=14),
-        ).pack(anchor="w", pady=(0, 14))
-
-        ctk.CTkLabel(frm, text="Email").pack(anchor="w")
-        email_ent = ctk.CTkEntry(frm, width=560, placeholder_text="you@example.com")
-        email_ent.pack(anchor="w", pady=(2, 8))
-        ctk.CTkLabel(frm, text="Password").pack(anchor="w")
-        pw_ent = ctk.CTkEntry(frm, width=560, show="*")
-        pw_ent.pack(anchor="w", pady=(2, 14))
-        try:
-            cached_email = str(fb.current_account_email() or "").strip()
-        except Exception:
-            cached_email = ""
-        if cached_email:
-            email_ent.insert(0, cached_email)
-
-        row = ctk.CTkFrame(frm, fg_color="transparent")
-        row.pack(anchor="w")
-
-        def _done_success(_msg: str) -> None:
-            from paths import set_desktop_firebase_account_uid
-
-            uid = fb.ensure_firebase_local_id_cached()
-            if uid:
-                set_desktop_firebase_account_uid(uid)
-                maybe_migrate_legacy_desktop_db(uid)
-            try:
-                top.destroy()
-            except Exception:
-                pass
-            if hide_main:
-                try:
-                    self.withdraw()
-                except Exception:
-                    pass
-            messagebox.showinfo(
-                "RootRecord Business Manager",
-                "Restarting RootRecord to apply your account data folder and cloud settings.",
-            )
-            _restart_rootrecord_app()
-
-        def _sign_in_email() -> None:
-            email = email_ent.get().strip()
-            pw = pw_ent.get()
-            if not email or not pw:
-                messagebox.showerror("RootRecord Business Manager", "Enter email and password.")
-                return
-            try:
-                fb.sign_in_with_password(email, pw)
-            except Exception as exc:
-                messagebox.showerror("RootRecord Business Manager", f"Sign in failed:\n{exc}")
-                return
-            _done_success("Signed in to cloud.")
-
-        def _sign_up_email() -> None:
-            email = email_ent.get().strip()
-            pw = pw_ent.get()
-            if not email or not pw:
-                messagebox.showerror("RootRecord Business Manager", "Enter email and password.")
-                return
-            try:
-                fb.sign_up(email, pw)
-            except Exception as exc:
-                messagebox.showerror("RootRecord Business Manager", f"Sign up failed:\n{exc}")
-                return
-            _done_success("Account created and signed in.")
-
-        def _sign_in_google() -> None:
-            if not fb.google_oauth_configured():
-                messagebox.showinfo(
-                    "RootRecord Business Manager",
-                    "Google OAuth is not configured. Add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET "
-                    "to firebase_embedded.py (Desktop OAuth client in Google Cloud — see firebase/FIREBASE_SETUP.md).",
-                )
-                return
-            try:
-                self._set_process_status("Google sign-in: complete sign-in in your browser…", auto_clear_ms=None)
-                fb.sign_in_with_google()
-            except Exception as exc:
-                messagebox.showerror("RootRecord Business Manager", f"Google sign-in failed:\n{exc}")
-                return
-            finally:
-                try:
-                    self._set_process_status("", auto_clear_ms=400)
-                except Exception:
-                    pass
-            _done_success("Signed in with Google.")
-
-        ctk.CTkButton(row, text="Sign in", width=120, command=_sign_in_email).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(row, text="Create account", width=130, command=_sign_up_email).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(row, text="Continue with Google", width=190, command=_sign_in_google).pack(side="left", padx=(0, 8))
-        pw_ent.bind("<Return>", lambda _e: _sign_in_email())
-
-    def _enforce_signin_gate_on_startup(self) -> None:
-        try:
-            import firebase_auth_client as fb
-        except ImportError:
-            return
-        if not fb.firebase_configured():
-            return
-        if fb.is_signed_in():
-            return
-        self._open_cloud_login_dialog(hide_main=True)
-
-    def _capture_signout_continuity(self) -> None:
-        st = load_user_state(self.uid)
-        if not st:
-            return
-        desc = str(st.current_work_description or st.last_task_description or "").strip()
-        if not desc:
-            return
-        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        settings_set(self.cfg, "pending_signin_continuity", True)
-        settings_set(self.cfg, "pending_signin_continuity_at", stamp)
-        settings_set(self.cfg, "pending_signin_last_task_desc", desc)
-        settings_set(self.cfg, "pending_signin_last_mode", str(st.current_mode or "off"))
-
-    def _apply_signin_continuity_if_needed(self) -> None:
-        if not bool(settings_get(self.cfg, "pending_signin_continuity", False)):
-            return
-        desc = str(settings_get(self.cfg, "pending_signin_last_task_desc", "") or "").strip()
-        mode = str(settings_get(self.cfg, "pending_signin_last_mode", "") or "").strip()
-        at = str(settings_get(self.cfg, "pending_signin_continuity_at", "") or "").strip()
-        if desc:
-            insert_time_entry_audit(
-                self.cfg,
-                self.uid,
-                entry_id=None,
-                action="signin_continuity",
-                meta_json=json.dumps({"last_task": desc, "mode": mode, "captured_at_utc": at}),
-            )
-            self._set_process_status(f"Continuity restored: {desc}", auto_clear_ms=2200)
-        settings_set(self.cfg, "pending_signin_continuity", False)
-
-    def _cloud_sync_now(self) -> None:
-        try:
-            import firebase_auth_client as fb
-            import firebase_cloud_backup as fb_cloud
-        except ImportError:
-            messagebox.showerror("RootRecord Business Manager", "Cloud sync is not available in this build.")
-            return
-        if not fb.firebase_configured():
-            messagebox.showinfo("RootRecord Business Manager", "Cloud sync is not configured in this build.")
-            return
-        if not fb.is_signed_in():
-            messagebox.showinfo("RootRecord Business Manager", "Sign in first, then run cloud sync.")
-            return
-        db_path = Path(self.cfg.db_path).resolve()
-        try:
-            self._set_process_status("Syncing to cloud...", auto_clear_ms=None)
-            result = fb_cloud.run_cloud_sync(db_path)
-            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            settings_set(self.cfg, "last_cloud_sync_utc", now)
-            settings_set(self.cfg, "last_cloud_sync_object", result.detail)
-            settings_set(self.cfg, "last_cloud_sync_mode", result.mode)
-            self._refresh_cloud_account_ui()
-            self._set_process_status("Cloud sync complete.", auto_clear_ms=1800)
-            if result.mode == "storage":
-                messagebox.showinfo(
-                    "RootRecord Business Manager",
-                    "Cloud sync complete.\n\nEncrypted database uploaded to Firebase Storage.",
-                )
-            else:
-                messagebox.showwarning(
-                    "RootRecord Business Manager",
-                    "Only a metadata record was written (Firestore). Your database file was not uploaded "
-                    "to Firebase Storage — usually Storage is disabled, misconfigured, or blocked by rules.\n\n"
-                    f"Detail: {result.storage_error or 'unknown'}",
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._refresh_cloud_account_ui()
-            self._set_process_status("Cloud sync failed.", auto_clear_ms=2200)
-            messagebox.showerror("RootRecord Business Manager", f"Cloud sync failed:\n{exc}")
-
-    def _restore_from_cloud_now(self) -> None:
-        try:
-            import firebase_auth_client as fb
-            import firebase_cloud_backup as fb_cloud
-        except ImportError:
-            messagebox.showerror("RootRecord Business Manager", "Cloud restore is not available in this build.")
-            return
-        if not fb.firebase_configured():
-            messagebox.showinfo("RootRecord Business Manager", "Cloud features are not configured in this build.")
-            return
-        if not fb.is_signed_in():
-            messagebox.showinfo("RootRecord Business Manager", "Sign in first, then restore from cloud.")
-            return
-        if not messagebox.askyesno(
-            "Restore from cloud",
-            "Replace your local database with the newest backup from Firebase Storage?\n\n"
-            "Your current database will be copied to rootrecord.pre_restore_<time>.db in the same folder.\n\n"
-            "Decryption only works on the same Windows user profile that uploaded the backups.\n\n"
-            "Continue?",
-            icon="warning",
-        ):
-            return
-        db_path = Path(self.cfg.db_path).resolve()
-        try:
-            self._set_process_status("Downloading backup from cloud...", auto_clear_ms=None)
-            name, sz = fb_cloud.restore_latest_cloud_database(dest_path=db_path)
-            self._set_process_status("Restore complete — restarting...", auto_clear_ms=None)
-            messagebox.showinfo(
-                "RootRecord Business Manager",
-                f"Restored from cloud object:\n{name}\n({sz:,} bytes decrypted).\n\n"
-                "The application will restart to open the restored database.",
-            )
-            _restart_rootrecord_app()
-        except Exception as exc:  # noqa: BLE001
-            self._refresh_cloud_account_ui()
-            self._set_process_status("Cloud restore failed.", auto_clear_ms=2200)
-            messagebox.showerror("RootRecord Business Manager", f"Cloud restore failed:\n{exc}")
+            self._prompt_immediate_job = None
 
     def _schedule_prompts(self) -> None:
         prev = getattr(self, "_prompt_job_id", None)
@@ -1883,6 +1362,7 @@ class RootRecordApp(ctk.CTk):
             except Exception:
                 pass
             self._prompt_job_id = None
+        self._cancel_prompt_immediate_job()
         first = int(settings_get(self.cfg, "prompt_first_delay_sec", 120)) * 1000
         interval = int(settings_get(self.cfg, "prompt_interval_sec", 900)) * 1000
         first = max(10_000, first)
@@ -1894,13 +1374,21 @@ class RootRecordApp(ctk.CTk):
 
         self._prompt_job_id = self.after(first, tick)
 
+    def _on_prompt_immediate(self) -> None:
+        self._prompt_immediate_job = None
+        self._prompt_popup()
+
     def _prompt_popup(self) -> None:
         st = load_user_state(self.uid)
         # Timed check-ins are only relevant while actively working.
         if not (st and st.current_mode == "working" and st.current_work_start_utc):
             return
         existing = getattr(self, "_active_prompt_popup", None)
-        if existing is not None and existing.winfo_exists():
+        try:
+            exists = existing is not None and bool(existing.winfo_exists())
+        except Exception:
+            exists = False
+        if exists:
             # Do not stack duplicate timed prompts; bring existing one to front.
             try:
                 if bool(settings_get(self.cfg, "prompt_popup_topmost", False)):
@@ -2063,6 +1551,139 @@ class RootRecordApp(ctk.CTk):
             spine.set_color(edge)
         ax.yaxis.label.set_color(fg)
         ax.xaxis.label.set_color(fg)
+
+    def _dash_disconnect_pie_hover(self) -> None:
+        cid = getattr(self, "_dash_pie_hover_cid", None)
+        canvas = getattr(self, "_dash_canvas_pie", None)
+        if cid is not None and canvas is not None:
+            try:
+                canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+        self._dash_pie_hover_cid = None
+
+    def _dash_pie_draw_leader_labels(
+        self,
+        ax,
+        wedges,
+        parts: list[dict],
+        total_sec: float,
+        fg: str,
+        line_color: str,
+    ) -> None:
+        """Draw leader lines from each slice to an outside label (name, %, time)."""
+        fs = 7 if len(wedges) > 8 else 8
+        r_line_in = 0.88
+        r_line_out = 1.34
+        for i, w in enumerate(wedges):
+            sec = float(parts[i].get("seconds_total") or 0)
+            pct = (100.0 * sec / total_sec) if total_sec > 0 else 0.0
+            raw_name = str(parts[i].get("task_name") or "").strip() or "Uncategorized"
+            name = raw_name if len(raw_name) <= 22 else raw_name[:19] + "…"
+            theta_mid = math.radians((w.theta1 + w.theta2) / 2.0)
+            x_in = r_line_in * math.cos(theta_mid)
+            y_in = r_line_in * math.sin(theta_mid)
+            x_out = r_line_out * math.cos(theta_mid)
+            y_out = r_line_out * math.sin(theta_mid)
+            ax.plot(
+                [x_in, x_out],
+                [y_in, y_out],
+                color=line_color,
+                linewidth=0.9,
+                solid_capstyle="round",
+                zorder=4,
+                clip_on=False,
+            )
+            if abs(x_out) < 0.12:
+                ha: str = "center"
+            elif x_out > 0:
+                ha = "left"
+            else:
+                ha = "right"
+            label = f"{name}\n{pct:.1f}%\n{_fmt_hm(sec)}"
+            ax.text(
+                x_out,
+                y_out,
+                label,
+                ha=ha,
+                va="center",
+                fontsize=fs,
+                color=fg,
+                zorder=5,
+                clip_on=False,
+                linespacing=1.15,
+            )
+
+    def _dash_pie_setup_hover(self, wedges, parts: list[dict], total_sec: float, fg: str) -> None:
+        """Hover highlights the active slice and shows category, %, and time below the chart."""
+        self._dash_disconnect_pie_hover()
+        self._dash_pie_wedges = wedges
+        self._dash_pie_slice_meta = [
+            {
+                "name": str(b.get("task_name") or "").strip() or "Uncategorized",
+                "sec": float(b.get("seconds_total") or 0),
+            }
+            for b in parts
+        ]
+        self._dash_pie_total_sec = total_sec
+        ax = self._dash_ax_pie
+        subtle = "#6b7a8f" if ctk.get_appearance_mode() == "Light" else "#8fa4bd"
+        self._dash_pie_hover_strip = ax.text(
+            0.5,
+            -0.06,
+            "Hover a slice for details",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=9,
+            color=subtle,
+            linespacing=1.2,
+            clip_on=False,
+        )
+
+        def on_motion(event) -> None:
+            wedges_l = getattr(self, "_dash_pie_wedges", None)
+            meta_l = getattr(self, "_dash_pie_slice_meta", None)
+            strip = getattr(self, "_dash_pie_hover_strip", None)
+            tot = float(getattr(self, "_dash_pie_total_sec", 0) or 0)
+            if not wedges_l or not meta_l or strip is None:
+                return
+            if event.inaxes != ax:
+                for w in wedges_l:
+                    w.set_alpha(1.0)
+                strip.set_text("Hover a slice for details")
+                strip.set_color(subtle)
+                self._dash_canvas_pie.draw_idle()
+                return
+            hit: int | None = None
+            for j, w in enumerate(wedges_l):
+                try:
+                    hit_test = w.contains(event)
+                    ok = hit_test[0] if isinstance(hit_test, tuple) else bool(hit_test)
+                except Exception:
+                    ok = False
+                if ok:
+                    hit = j
+                    break
+            if hit is None:
+                for w in wedges_l:
+                    w.set_alpha(1.0)
+                strip.set_text("Hover a slice for details")
+                strip.set_color(subtle)
+                self._dash_canvas_pie.draw_idle()
+                return
+            m = meta_l[hit]
+            nm = m["name"]
+            sec = float(m["sec"])
+            pct = (100.0 * sec / tot) if tot > 0 else 0.0
+            disp = nm if len(nm) <= 40 else nm[:37] + "…"
+            strip.set_text(f"{disp}\n{pct:.1f}%  ·  {_fmt_hm(sec)}")
+            strip.set_color(fg)
+            for j, w in enumerate(wedges_l):
+                w.set_alpha(1.0 if j == hit else 0.52)
+            self._dash_canvas_pie.draw_idle()
+
+        self._dash_pie_hover_cid = self._dash_canvas_pie.mpl_connect("motion_notify_event", on_motion)
 
     def _dash_scale_value(self) -> str:
         v = str(getattr(self, "_dash_scale", None).get() if getattr(self, "_dash_scale", None) else "Daily")
@@ -2228,6 +1849,7 @@ class RootRecordApp(ctk.CTk):
                 if nm and re.fullmatch(r"#[0-9A-Fa-f]{6}", col):
                     cat_color_map[nm] = col.upper()
 
+            self._dash_disconnect_pie_hover()
             self._dash_ax_pie.clear()
             self._dash_style_axes(self._dash_fig_pie, self._dash_ax_pie)
             parts = [b for b in breakdown if float(b.get("seconds_total") or 0) > 1]
@@ -2247,28 +1869,35 @@ class RootRecordApp(ctk.CTk):
             else:
                 sizes = [float(b["seconds_total"]) for b in parts]
                 wedge_edge = "#1a1a1a" if ctk.get_appearance_mode() != "Light" else "#cccccc"
+                leader_line = "#5a6d82" if ctk.get_appearance_mode() == "Light" else "#7d93ad"
                 total_sec = sum(sizes) or 1.0
+                slice_colors: list[str] = []
+                for bi, b in enumerate(parts):
+                    nm = str(b.get("task_name") or "").strip() or "Uncategorized"
+                    ccol = cat_color_map.get(nm)
+                    slice_colors.append(ccol if ccol else colors[bi % len(colors)])
 
-                def _pie_autolabel(pct: float) -> str:
-                    if pct < 7:
-                        return ""
-                    sec_val = (pct / 100.0) * total_sec
-                    return f"{pct:.0f}%\n{sec_val / 3600.0:.1f}h"
-
-                _w, _t, autotexts = self._dash_ax_pie.pie(
+                wedges, _texts = self._dash_ax_pie.pie(
                     sizes,
                     labels=None,
-                    autopct=_pie_autolabel,
-                    pctdistance=0.72,
-                    colors=colors[: len(sizes)],
-                    wedgeprops={"linewidth": 0.5, "edgecolor": wedge_edge},
-                    textprops={"fontsize": 8, "color": "#ffffff"},
+                    autopct=None,
+                    colors=slice_colors,
+                    wedgeprops={"linewidth": 0.6, "edgecolor": wedge_edge},
                 )
-                for tx in autotexts:
-                    tx.set_color("#ffffff")
-                    tx.set_fontsize(8)
+                self._dash_pie_draw_leader_labels(
+                    self._dash_ax_pie,
+                    wedges,
+                    parts,
+                    total_sec,
+                    fg,
+                    leader_line,
+                )
                 self._dash_ax_pie.axis("equal")
-            self._dash_ax_pie.set_title(f"{label} by category", fontsize=11, pad=8)
+                self._dash_ax_pie.set_xlim(-1.75, 1.75)
+                self._dash_ax_pie.set_ylim(-1.75, 1.75)
+                self._dash_pie_setup_hover(wedges, parts, total_sec, fg)
+                self._dash_fig_pie.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.14)
+            self._dash_ax_pie.set_title(f"{label} by category", fontsize=11, pad=10)
             self._dash_canvas_pie.draw()
 
             self._dash_ax_bar.clear()
@@ -3203,9 +2832,10 @@ class RootRecordApp(ctk.CTk):
     def _resume_prompts_if_working_now(self) -> None:
         st = load_user_state(self.uid)
         if st and st.current_mode == "working" and st.current_work_start_utc:
-            # Re-arm timer loop and immediately ask for current activity after action dialog closes.
+            # Re-arm timer loop and show one check-in shortly after (single pending callback).
             self._schedule_prompts()
-            self.after(120, self._prompt_popup)
+            self._cancel_prompt_immediate_job()
+            self._prompt_immediate_job = self.after(120, self._on_prompt_immediate)
 
     def _run_time_action(self, msg: str) -> None:
         messagebox.showinfo("RootRecord Business Manager", msg)
@@ -7240,13 +6870,12 @@ class RootRecordApp(ctk.CTk):
         )
         self._settings_defaults_ref.pack(fill="x", pady=(0, 16))
 
-        ctk.CTkLabel(scroll, text="Appearance", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(0, 4))
         ctk.CTkLabel(
             scroll,
-            text="Theme is locked to Dark for readability.",
+            text=f"Installed version: {APP_VERSION}",
             text_color="gray",
             font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", pady=(0, 12))
+        ).pack(anchor="w", pady=(0, 16))
 
         ctk.CTkLabel(scroll, text="Defaults", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", pady=(16, 4)
@@ -7652,7 +7281,7 @@ def bootstrap(cfg: DbConfig) -> None:
 
 
 def _restart_rootrecord_app() -> None:
-    """Spawn a fresh process and exit (used after auth, path, or DB restore)."""
+    """Spawn a fresh process and exit (e.g. after database import)."""
     argv = [sys.executable] + sys.argv[1:]
     try:
         subprocess.Popen(argv)
@@ -7662,41 +7291,13 @@ def _restart_rootrecord_app() -> None:
     os._exit(0)
 
 
-def _configure_desktop_paths_for_auth() -> None:
-    """Scope ``data/`` under ``accounts/<firebaseUid>/`` when signed in; migrate legacy DB once."""
-    try:
-        import firebase_auth_client as fb
-        from paths import set_desktop_firebase_account_uid
-
-        if not fb.firebase_configured():
-            set_desktop_firebase_account_uid(None)
-            return
-        if fb.is_signed_in():
-            uid = fb.ensure_firebase_local_id_cached()
-            set_desktop_firebase_account_uid(uid if uid else None)
-            if uid:
-                maybe_migrate_legacy_desktop_db(uid)
-        else:
-            set_desktop_firebase_account_uid(None)
-    except ImportError:
-        try:
-            from paths import set_desktop_firebase_account_uid
-
-            set_desktop_firebase_account_uid(None)
-        except Exception:
-            pass
-    except Exception:
-        try:
-            from paths import set_desktop_firebase_account_uid
-
-            set_desktop_firebase_account_uid(None)
-        except Exception:
-            pass
+def _data_footer_line(cfg: DbConfig) -> str:
+    return f"Data: {cfg.db_path}  ·  Workspace: {workspace_root()}"
 
 
 def run_app() -> None:
-    _configure_desktop_paths_for_auth()
     cfg = load_db_config()
+    maybe_migrate_legacy_desktop_db()
     try:
         ensure_schema(cfg)
         migrate_registered_users_from_json(cfg, registered_users_file())
@@ -7705,5 +7306,6 @@ def run_app() -> None:
         messagebox.showerror("RootRecord Business Manager", f"Database init failed:\n{exc}")
         raise SystemExit(1) from exc
     bootstrap(cfg)
+
     app = RootRecordApp(cfg)
     app.mainloop()
