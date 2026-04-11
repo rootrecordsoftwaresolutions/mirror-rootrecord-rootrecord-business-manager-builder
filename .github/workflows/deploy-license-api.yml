@@ -66,3 +66,26 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: cloudflare
           command: deploy
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## License API"
+            echo "Worker name: **rootrecord-license** (see Cloudflare → Workers & Pages for the public URL)."
+            echo ""
+            echo "Optional: add repository variable **LICENSE_API_BASE_URL** (no trailing slash) = that URL. The next deploy will **curl \`/health\`** and fail the job if the API is down."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify live /health
+        if: ${{ vars.LICENSE_API_BASE_URL != '' }}
+        env:
+          BASE: ${{ vars.LICENSE_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          B="${BASE%/}"
+          echo "GET $B/health"
+          test "$(curl -fsS -o /tmp/rr-health.json -w '%{http_code}' "$B/health")" = "200"
+          cat /tmp/rr-health.json
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Live /health check" >> "$GITHUB_STEP_SUMMARY"
+          echo "OK: \`$B/health\` returned HTTP 200." >> "$GITHUB_STEP_SUMMARY"

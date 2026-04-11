@@ -27,6 +27,10 @@ CI deploys the Worker and applies D1 migrations when you **push to `main`** (onl
 | `CLOUDFLARE_ACCOUNT_ID` | Wrangler account scope |
 | `LICENSE_API_SECRET` | Optional; syncs Bearer secret for `/v1/entitlement` |
 
+### Optional: automatic `/health` check on every deploy
+
+In **Settings → Secrets and variables → Actions → Variables**, add **`LICENSE_API_BASE_URL`** = your Worker base URL (e.g. `https://rootrecord-license.your-subdomain.workers.dev`, **no trailing slash**). The deploy workflow will `GET /health` after deploy and **fail** if it is not HTTP 200.
+
 ---
 
 ## Behavior
