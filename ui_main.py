@@ -456,6 +456,16 @@ class RootRecordApp(ctk.CTk):
                     font=ctk.CTkFont(size=12, weight="bold"),
                     text_color="#e6c35c",
                 ).pack(anchor="w", pady=(0, 4))
+                sub_row = ctk.CTkFrame(foot, fg_color="transparent")
+                sub_row.pack(anchor="w", pady=(0, 4))
+                ctk.CTkButton(
+                    sub_row,
+                    text="Subscribe / billing",
+                    width=168,
+                    fg_color=self._theme_accent,
+                    hover_color=self._theme_hover,
+                    command=self._on_subscribe_billing,
+                ).pack(side="left")
         except Exception:
             pass
         self._foot_var = tk.StringVar(value=_data_footer_line(cfg))
@@ -470,6 +480,33 @@ class RootRecordApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.bind("<Unmap>", self._on_window_unmap)
         self._schedule_dashboard_clock_live_refresh()
+
+    def _on_subscribe_billing(self) -> None:
+        """Open Stripe Checkout (Worker must have Stripe secrets + price id)."""
+        try:
+            from license_client import create_checkout_session
+            from license_config import get_license_api_config
+        except ImportError as exc:
+            messagebox.showerror("RootRecord", str(exc))
+            return
+        if not get_license_api_config():
+            messagebox.showinfo("RootRecord", "License API is not configured (LICENSE_API_BASE_URL).")
+            return
+        email = (settings_get(self.cfg, "license_account_email", "") or "").strip() or (
+            os.environ.get("LICENSE_EMAIL") or ""
+        ).strip()
+        if not email:
+            messagebox.showerror(
+                "RootRecord",
+                "No email for billing. Set LICENSE_EMAIL in .env or complete license sign-in first.",
+            )
+            return
+        try:
+            url = create_checkout_session(email)
+            if url:
+                webbrowser.open(url)
+        except Exception as exc:
+            messagebox.showerror("RootRecord", f"Could not start checkout:\n{exc}")
 
     def _apply_app_icon(self) -> None:
         candidates: list[Path] = []

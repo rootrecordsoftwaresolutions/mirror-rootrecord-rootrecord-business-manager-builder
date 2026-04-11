@@ -1,6 +1,6 @@
 # RootRecord license API (Cloudflare Workers + D1)
 
-Trial + entitlement backend. **Stripe webhooks** can be added later to set `subscription_status` / `stripe_customer_id` on `accounts`.
+Trial + entitlement + **Stripe Checkout + webhooks** (updates `subscription_status`, `stripe_customer_id`, `stripe_subscription_id` on `accounts`).
 
 ## Deploy without local terminals (recommended)
 
@@ -49,6 +49,31 @@ If the UI labels differ slightly, search the permission picker for **Workers Scr
 |--------|---------|
 | `CLOUDFLARE_API_TOKEN` | Deploy Worker + run D1 migrations |
 | `LICENSE_API_SECRET` | Optional; syncs Bearer secret for `/v1/entitlement` |
+
+---
+
+## Stripe (set on the Worker in Cloudflare — not in GitHub)
+
+After deploy, add these under **Workers → rootrecord-license → Settings → Variables and Secrets** (or `wrangler secret put` from `cloudflare/`):
+
+| Name | Kind | Value |
+|------|------|--------|
+| `STRIPE_SECRET_KEY` | Secret | `sk_live_…` or `sk_test_…` ([API keys](https://dashboard.stripe.com/apikeys)) |
+| `STRIPE_WEBHOOK_SECRET` | Secret | `whsec_…` from the webhook endpoint below |
+| `STRIPE_PRICE_ID` | Variable (or secret) | `price_…` for your **$4.99/mo** recurring price ([Products](https://dashboard.stripe.com/products)) |
+
+**Webhook endpoint (Stripe Dashboard → Developers → Webhooks → Add endpoint):**
+
+- **URL:** `https://<your-worker-host>/webhooks/stripe`  
+  Example: `https://rootrecord-license.wildecho94.workers.dev/webhooks/stripe`
+- **Events to send:**  
+  `checkout.session.completed`  
+  `customer.subscription.updated`  
+  `customer.subscription.deleted`
+
+Copy the **Signing secret** (`whsec_…`) into **`STRIPE_WEBHOOK_SECRET`** on the Worker, then **redeploy** (or save — secrets bind on next deploy).
+
+**Desktop app:** read-only footer shows **Subscribe / billing** → opens Stripe Checkout (`POST /v1/billing/checkout` with the same Bearer as entitlement).
 
 ---
 

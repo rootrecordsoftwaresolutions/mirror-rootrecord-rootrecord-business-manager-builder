@@ -105,3 +105,22 @@ def fetch_entitlement(email: str, device_id: str, *, cfg: LicenseApiConfig | Non
         valid_until=body.get("valid_until"),
         raw=body,
     )
+
+
+def create_checkout_session(email: str, *, cfg: LicenseApiConfig | None = None) -> str:
+    """POST /v1/billing/checkout — returns Stripe Checkout URL."""
+    c = cfg or get_license_api_config()
+    if not c:
+        raise RuntimeError("LICENSE_API_BASE_URL is not configured")
+    url = f"{c.base_url}/v1/billing/checkout"
+    headers = {"Content-Type": "application/json"}
+    if c.api_secret:
+        headers["Authorization"] = f"Bearer {c.api_secret}"
+    with httpx.Client(timeout=45.0) as client:
+        r = client.post(url, json={"email": email.strip()}, headers=headers)
+    r.raise_for_status()
+    data = r.json()
+    checkout = data.get("url")
+    if not isinstance(checkout, str) or not checkout.startswith("http"):
+        raise RuntimeError("Server did not return a checkout URL")
+    return checkout

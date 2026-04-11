@@ -1,8 +1,9 @@
-export interface Env {
-  DB: D1Database;
-  /** If set, clients must send Authorization: Bearer <LICENSE_API_SECRET> */
-  LICENSE_API_SECRET?: string;
-}
+import {
+  createStripeCheckoutSession,
+  handleStripeWebhook,
+  verifyStripeSignature,
+} from "./stripe";
+import type { Env } from "./types";
 
 const TRIAL_DAYS = 14;
 const TRIAL_MS = TRIAL_DAYS * 24 * 60 * 60 * 1000;
@@ -18,6 +19,67 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, service: "rootrecord-license" });
+    }
+
+    if (request.method === "GET" && url.pathname === "/billing/success") {
+      return htmlResponse(
+        200,
+        "<!doctype html><html><head><meta charset=utf-8><title>Subscribed</title></head><body><p>Payment complete. You can close this tab and return to RootRecord.</p></body></html>"
+      );
+    }
+    if (request.method === "GET" && url.pathname === "/billing/cancel") {
+      return htmlResponse(
+        200,
+        "<!doctype html><html><head><meta charset=utf-8><title>Cancelled</title></head><body><p>Checkout cancelled. You can close this tab.</p></body></html>"
+      );
+    }
+
+    if (request.method === "POST" && url.pathname === "/webhooks/stripe") {
+      const whSecret = env.STRIPE_WEBHOOK_SECRET?.trim();
+      if (!whSecret) {
+        return json({ error: { code: "WEBHOOK_DISABLED", message: "STRIPE_WEBHOOK_SECRET not set" } }, 503);
+      }
+      const rawBody = await request.text();
+      const sig = request.headers.get("Stripe-Signature");
+      const ok = await verifyStripeSignature(rawBody, sig, whSecret);
+      if (!ok) {
+        return json({ error: "Invalid signature" }, 400);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {
+        return json({ error: "Invalid JSON" }, 400);
+      }
+      try {
+        await handleStripeWebhook(parsed, env.DB);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return json({ error: msg }, 500);
+      }
+      return json({ received: true });
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/billing/checkout") {
+      const authErr = requireApiSecret(request, env);
+      if (authErr) return withCors(authErr);
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return withCors(json({ error: { code: "BAD_JSON", message: "Body must be JSON" } }, 400));
+      }
+      const o = body as Record<string, unknown>;
+      const email = typeof o.email === "string" ? o.email.trim().toLowerCase() : "";
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return withCors(json({ error: { code: "INVALID_EMAIL", message: "Valid email required" } }, 400));
+      }
+      const origin = url.origin;
+      const result = await createStripeCheckoutSession(email, env, origin);
+      if ("error" in result) {
+        return withCors(json({ error: { code: "STRIPE_ERROR", message: result.error } }, 502));
+      }
+      return withCors(json({ url: result.url }));
     }
 
     if (request.method === "POST" && url.pathname === "/v1/entitlement") {
@@ -57,7 +119,7 @@ export default {
 interface EntitlementPayload {
   account_id: string;
   access: "full" | "read_only";
-  reason: "trialing" | "trial_expired" | "paid";
+  reason: "trialing" | "trial_expired" | "paid" | "past_due";
   trial_ends_at: string | null;
   valid_until: string;
   subscription_status: string;
@@ -74,6 +136,7 @@ interface AccountRow {
   trial_ends_at: number | null;
   subscription_status: string;
   stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -182,11 +245,14 @@ async function loadAccount(db: D1Database, id: string): Promise<AccountRow | nul
 function buildEntitlementPayload(account: AccountRow, now: number): EntitlementPayload {
   const sub = account.subscription_status || "none";
   let access: "full" | "read_only" = "read_only";
-  let reason: "trialing" | "trial_expired" | "paid" = "trial_expired";
+  let reason: EntitlementPayload["reason"] = "trial_expired";
 
   if (sub === "active") {
     access = "full";
     reason = "paid";
+  } else if (sub === "past_due") {
+    access = "read_only";
+    reason = "past_due";
   } else if (account.trial_ends_at != null && now < account.trial_ends_at) {
     access = "full";
     reason = "trialing";
@@ -247,8 +313,15 @@ function withCors(res: Response): Response {
   const h = new Headers(res.headers);
   h.set("Access-Control-Allow-Origin", "*");
   h.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  h.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  h.set("Access-Control-Allow-Headers", "Content-Type, Authorization, Stripe-Signature");
   return new Response(res.body, { status: res.status, headers: h });
+}
+
+function htmlResponse(status: number, body: string): Response {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
 }
 
 function corsPreflight(): Response {
@@ -257,7 +330,7 @@ function corsPreflight(): Response {
     headers: {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, Stripe-Signature",
       "Access-Control-Max-Age": "86400",
     },
   });
