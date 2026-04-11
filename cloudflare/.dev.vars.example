@@ -1,0 +1,3 @@
+# Optional: only for `npm run dev` (local wrangler). Not required for cloud deploy.
+# Production: `wrangler secret put LICENSE_API_SECRET`
+LICENSE_API_SECRET=change-me-to-a-long-random-string

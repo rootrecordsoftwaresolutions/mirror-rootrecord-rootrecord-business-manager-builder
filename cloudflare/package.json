@@ -1,0 +1,17 @@
+{
+  "name": "rootrecord-license-worker",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create rootrecord_license",
+    "db:migrate": "wrangler d1 migrations apply rootrecord_license --remote",
+    "db:migrate:remote": "wrangler d1 migrations apply rootrecord_license --remote",
+    "db:migrate:local": "wrangler d1 migrations apply rootrecord_license --local"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.99.0"
+  }
+}

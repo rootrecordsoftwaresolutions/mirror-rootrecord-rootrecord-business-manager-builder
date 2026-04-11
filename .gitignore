@@ -10,3 +10,6 @@ build/output/
 build/build_rootrecord/
 build/msix/_stage/
 .firebase/
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/.dev.vars

@@ -1,0 +1,11 @@
+name = "rootrecord-license"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# 1) Run: npm run db:create
+# 2) Paste the returned database_id here:
+[[d1_databases]]
+binding = "DB"
+database_name = "rootrecord_license"
+# Must be a real id from `npm run db:create` before `db:migrate:remote` / deploy.
+database_id = "00000000-0000-0000-0000-000000000001"
