@@ -7,7 +7,10 @@
     "db:create": "wrangler d1 create rootrecord_license",
     "db:migrate": "wrangler d1 migrations apply rootrecord_license --remote",
     "db:migrate:remote": "wrangler d1 migrations apply rootrecord_license --remote",
-    "db:migrate:local": "wrangler d1 migrations apply rootrecord_license --local"
+    "db:migrate:local": "wrangler d1 migrations apply rootrecord_license --local",
+    "cf:whoami": "wrangler whoami",
+    "cf:d1:list": "wrangler d1 list",
+    "cf:ids": "wrangler whoami && wrangler d1 list"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",

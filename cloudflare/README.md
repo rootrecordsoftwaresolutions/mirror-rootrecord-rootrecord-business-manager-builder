@@ -67,6 +67,14 @@ Success response shape:
 
 ---
 
+## Get Account ID + D1 IDs without hunting the dashboard
+
+1. **From the address bar:** when you’re anywhere in the dashboard, the URL often looks like  
+   `https://dash.cloudflare.com/<ACCOUNT_ID>/...` — the first path segment after `.com/` is your **Account ID** (copy that for GitHub `CLOUDFLARE_ACCOUNT_ID`).
+
+2. **From the CLI** (after `npm install` in `cloudflare/` and `npx wrangler login` once):  
+   `npm run cf:ids` — prints **`wrangler whoami`** (account) and **`wrangler d1 list`** (database names + UUIDs). Use that UUID for `wrangler.toml` if needed; yours may already be set.
+
 ## Optional: manual CLI
 
 If you prefer `wrangler` locally: `npm install`, `npm run db:create` (or dashboard D1), paste `database_id`, `npm run db:migrate`, `wrangler secret put LICENSE_API_SECRET`, `npm run deploy`. **Not required** if you use GitHub Actions above.
