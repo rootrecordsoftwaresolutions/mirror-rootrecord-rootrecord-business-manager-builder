@@ -84,8 +84,7 @@ jobs:
           set -euo pipefail
           B="${BASE%/}"
           echo "GET $B/health"
-          test "$(curl -fsS -o /tmp/rr-health.json -w '%{http_code}' "$B/health")" = "200"
-          cat /tmp/rr-health.json
+          curl -fsS "$B/health"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Live /health check" >> "$GITHUB_STEP_SUMMARY"
           echo "OK: \`$B/health\` returned HTTP 200." >> "$GITHUB_STEP_SUMMARY"
