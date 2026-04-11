@@ -1,0 +1,143 @@
+RootRecord Roadmap: Notes, Tasks, Calendar, Bookings, Branding, Shifts
+=====================================================================
+
+Purpose
+-------
+Add practical planning and scheduling features without bloating the core business/compliance workflow.
+
+High-Value Additions
+--------------------
+1) Notes
+   - Daily notes tied to date, project, and client.
+   - Pin important notes.
+   - Quick search.
+   - Optional "include in report" toggle.
+   - Future option: voice-to-text.
+
+2) Things To Do (Tasks)
+   - Lightweight tasks with due date, priority, status, and project/client links.
+   - Convert task -> time entry (start timer from task).
+   - Recurring tasks (weekly/monthly reminders).
+
+3) Calendar Integrations
+   - Phase 1: one-way import (Google/Outlook events into RootRecord Schedule).
+   - Phase 2: optional push of RootRecord schedule blocks to external calendars.
+   - Full two-way sync should be delayed until auth and conflict handling are stable.
+
+4) Bookings (Calendly-style)
+   - Booking links per service type (consult, field visit, estimate).
+   - Auto-create client + schedule event on booking.
+   - Optional pre-booking intake fields (project type, notes, contact context).
+
+5) Branding (Custom Logos + Icons)
+   - Replace generic look with brand identity across app and installer.
+   - Add custom logo support for sidebar/header/about.
+   - Add custom icon support for app window, taskbar, executable, and installer.
+   - Add optional white-label profile support (brand name/colors/assets).
+   - Keep a default fallback theme so builds still work without custom assets.
+
+6) Shifts
+   - Show past shifts with start/end and total duration.
+   - Treat one continuous work session as one shift, even when it crosses midnight.
+   - Show both:
+     - Shift date anchor (start date), and
+     - Actual end date/time when it finishes next day.
+   - Include break totals inside each shift summary.
+   - Add filters: last 7 days, last 30 days, custom range.
+
+Shift Rules (for clarity)
+-------------------------
+- Shift starts on clock-in.
+- Shift ends on clock-out.
+- Breaks do not split the shift.
+- Midnight rollover does not split the shift.
+- Missing clock-out should show as "Active shift" until closed.
+
+Branding/White-Label Scope
+--------------------------
+Core branding assets:
+   - logo_primary.png
+   - logo_compact.png (optional)
+   - app_icon.ico
+   - installer_icon.ico
+
+Branding settings:
+   - brand_display_name
+   - brand_tagline
+   - brand_primary_color
+   - brand_accent_color
+   - brand_logo_path
+   - brand_icon_path
+   - white_label_mode (true/false)
+
+Branding implementation order:
+1. Central branding config and asset loader.
+2. In-app logo + title replacement.
+3. Runtime app icon support (window/taskbar).
+4. Build-time EXE icon wiring (PyInstaller spec).
+5. Installer branding + icon wiring (Inno Setup).
+6. Optional per-client profile export/import.
+
+Suggested Migrations
+--------------------
+Data model migration:
+   - notes
+   - tasks
+   - task_history
+   - calendar_accounts
+   - calendar_events
+   - booking_rules
+   - booking_events
+   - shifts (optional persisted table; or derive from time/break segments)
+
+Linking migration:
+   - Add optional foreign keys where needed:
+     - project_id
+     - client_id
+     - time_entry_id
+     - shift_id (for optional linkage of entries to a shift record)
+
+Audit/compliance migration:
+   - Add change logs for notes/tasks similar to time-entry audit trail.
+
+Settings migration:
+   - Feature toggles for:
+     - notes
+     - tasks
+     - calendar integration
+     - bookings
+     - branding overrides
+
+Performance migration:
+   - Add indexes for date range and search-heavy fields.
+   - Add indexes for shift start/end queries.
+
+Build/installer migration:
+   - Add configurable icon/logo path support for exe and installer packaging.
+
+Shift calculation migration/API:
+   - Add API for listing shifts by range.
+   - Ensure shift aggregation uses lifecycle events (clock-in/out, break markers),
+     not naive calendar-day splitting.
+
+Recommended Delivery Order
+--------------------------
+1. Notes + Tasks core
+2. Task-to-time-entry bridge
+3. Calendar import (read-only)
+4. Booking intake + auto-create schedule entry
+5. Two-way calendar sync
+6. Branding pass (if not done earlier as part of product polish)
+7. Shift history screen + shift aggregation API
+
+Versioning Suggestion
+---------------------
+Use incremental releases after 1.3.13:
+   - 1.3.14: Notes + Tasks base
+   - 1.3.15: Task -> Time bridge
+   - 1.3.16: Calendar import
+   - 1.3.17: Booking intake
+   - 1.3.18: Sync hardening / conflict handling
+   - 1.3.19: Branding + custom icon/logo support
+   - 1.3.20: Shift history (midnight-safe sessions)
+

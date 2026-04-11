@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <!-- @@PUBLISHER@@ must match the Publisher in Partner Center (Package Identity). Replace before Store upload. -->
+  <Identity
+    Name="@@IDENTITY_NAME@@"
+    Publisher="@@PUBLISHER@@"
+    Version="@@MSIX_VERSION@@"
+    ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>RootRecord Business Manager (Beta)</DisplayName>
+    <PublisherDisplayName>RootRecord</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+  <Applications>
+    <Application Id="RootRecord" Executable="RootRecord.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="RootRecord Business Manager (Beta)"
+        Description="Time, money, clients, inventory, and reports for your business."
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        BackgroundColor="#1a1a2e"
+        AppListEntry="default" />
+    </Application>
+  </Applications>
+</Package>

@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/*.json
+data/*.db
+dist/
+build/output/
+build/build_rootrecord/
+build/msix/_stage/
