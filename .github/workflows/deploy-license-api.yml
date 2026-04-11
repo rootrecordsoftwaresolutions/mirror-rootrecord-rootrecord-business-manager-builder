@@ -1,7 +1,9 @@
 # Deploy Cloudflare Worker + apply D1 migrations from GitHub (no local wrangler required).
 #
 # GitHub repo secret (Settings → Secrets and variables → Actions):
-#   CLOUDFLARE_API_TOKEN — API Token with: Workers Scripts:Edit, D1:Edit
+#   CLOUDFLARE_API_TOKEN — Create at dash.cloudflare.com/profile/api-tokens
+#     Custom token permissions: Account → Workers Scripts → Edit; Account → D1 → Edit.
+#     Steps: cloudflare/README.md → "Create CLOUDFLARE_API_TOKEN"
 #   account_id is in cloudflare/wrangler.toml (no separate ACCOUNT_ID secret).
 # Optional:
 #   LICENSE_API_SECRET     — If set, synced to Worker as LICENSE_API_SECRET on each deploy (Bearer token for /v1/entitlement)

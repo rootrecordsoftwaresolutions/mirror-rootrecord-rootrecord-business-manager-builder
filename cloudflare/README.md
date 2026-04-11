@@ -10,13 +10,38 @@ CI deploys the Worker and applies D1 migrations when you **push to `main`** (onl
 
 1. **Create a D1 database** in the [Cloudflare dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **D1** → **Create database** → name it **`rootrecord_license`** (must match `wrangler.toml`).
 2. Open the database → copy **Database ID** → paste into **`cloudflare/wrangler.toml`** as `database_id = "..."` → **commit and push** (this repo must know which DB to migrate).
-3. **API token** (Cloudflare): [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create Token** → use template **Edit Cloudflare Workers** and add **D1: Edit** (or create custom with Workers Scripts:Edit + D1:Edit for your account).
-4. **Account ID** is already set in **`cloudflare/wrangler.toml`** as `account_id` (no GitHub secret for it).
+3. **Create the API token** (required permissions are spelled out below — **Workers Scripts: Edit** and **D1: Edit**). See **[Create `CLOUDFLARE_API_TOKEN`](#create-cloudflare_api_token-permissions--steps)**.
+4. **Account ID** is already in **`cloudflare/wrangler.toml`** as `account_id` (no GitHub secret for it).
 5. **GitHub** (this repo) → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
-   - `CLOUDFLARE_API_TOKEN` — paste the token from step 3  
+   - `CLOUDFLARE_API_TOKEN` — the token string from step 3  
    - Optional: `LICENSE_API_SECRET` — long random string; if set, CI runs `wrangler secret put` so the Worker requires `Authorization: Bearer …` (same value in your app config).
 
 6. Push to `main` (or **Actions** → **Deploy license API (Cloudflare)** → **Run workflow**). When green, use the Worker URL from the deploy log (or **Workers & Pages** → **rootrecord-license**).
+
+### Create `CLOUDFLARE_API_TOKEN` (permissions + steps)
+
+**Why not the Global API Key:** use an **API Token** with narrow permissions. Do **not** use the Global API Key for GitHub Actions.
+
+**Minimum permissions** (Cloudflare dashboard labels):
+
+| Scope | Permission | Access |
+|-------|------------|--------|
+| **Account** | **Workers Scripts** | **Edit** |
+| **Account** | **D1** | **Edit** |
+
+**Clicks:**
+
+1. Open **[API Tokens](https://dash.cloudflare.com/profile/api-tokens)** (avatar → *My Profile* → *API Tokens*, or that link).
+2. **Create Token** → **Create Custom Token** → **Get started**.
+3. **Token name:** e.g. `github-deploy-rootrecord-license`.
+4. **Permissions** → **Add** — add **both** rows:
+   - **Account** → **Workers Scripts** → **Edit**
+   - **Account** → **D1** → **Edit**
+5. **Account Resources:** **Include** → **Specific account** → pick this Cloudflare account (or *All accounts* if you only have one).
+6. **Continue to summary** → **Create Token**.
+7. **Copy** the token value immediately (shown once). This string is what goes in GitHub as **`CLOUDFLARE_API_TOKEN`**.
+
+If the UI labels differ slightly, search the permission picker for **Workers Scripts** and **D1** — both must be **Edit**. If deploy fails with *Authentication error* or *forbidden*, the token is missing one of these or the wrong account was selected under **Account Resources**.
 
 ### Required GitHub secrets
 
