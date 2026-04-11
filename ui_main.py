@@ -445,7 +445,19 @@ class RootRecordApp(ctk.CTk):
         self._switch_nav("Dashboard")
 
         foot = ctk.CTkFrame(self, height=28, fg_color="transparent")
-        foot.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 6))
+        foot.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 6))
+        try:
+            import license_gate as _license_gate
+
+            if _license_gate.is_read_only():
+                ctk.CTkLabel(
+                    foot,
+                    text="Read-only — trial ended or subscription inactive. View and export only.",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color="#e6c35c",
+                ).pack(anchor="w", pady=(0, 4))
+        except Exception:
+            pass
         self._foot_var = tk.StringVar(value=_data_footer_line(cfg))
         ctk.CTkLabel(foot, textvariable=self._foot_var, font=ctk.CTkFont(size=11), text_color="gray").pack(
             anchor="w"
@@ -772,6 +784,13 @@ class RootRecordApp(ctk.CTk):
         return out_path
 
     def _auto_backup_if_due(self) -> None:
+        try:
+            import license_gate as _lg
+
+            if _lg.is_read_only():
+                return
+        except Exception:
+            pass
         if not bool(settings_get(self.cfg, "auto_backup_enabled", False)):
             return
         try:
@@ -7306,6 +7325,10 @@ def run_app() -> None:
         messagebox.showerror("RootRecord Business Manager", f"Database init failed:\n{exc}")
         raise SystemExit(1) from exc
     bootstrap(cfg)
+
+    from license_runtime import apply_license_at_startup
+
+    apply_license_at_startup(cfg)
 
     app = RootRecordApp(cfg)
     app.mainloop()

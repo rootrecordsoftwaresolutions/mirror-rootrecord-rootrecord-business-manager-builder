@@ -58,6 +58,15 @@ def connect(cfg: DbConfig) -> sqlite3.Connection:
     conn = sqlite3.connect(str(cfg.db_path), timeout=30.0)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        import license_gate as _lg
+
+        if _lg.is_read_only():
+            conn.execute("PRAGMA query_only = ON")
+    except sqlite3.OperationalError:
+        pass
+    except Exception:
+        pass
     return conn
 
 
