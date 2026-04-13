@@ -6,9 +6,9 @@
 
 **One calm workspace for time, money, clients, inventory, and reports - built for owners and operators who want clarity without living in a browser.**
 
-Current release: **1.3.42** (see **About & Help** in the app for the exact build on your device.)
+Current release: **1.3.43** (see **About & Help** in the app for the exact build on your device.)
 
-**What’s new in 1.3.42:** Azure signing now covers **every bundled `.exe`, `.dll`, and `.pyd`** under the app folder (not only the main launcher), which helps **Smart App Control** and similar policies that block unsigned code the process loads. The **1.3.40** installer/Signtool behavior (Inno signs internal setup binaries during compile) is unchanged.
+**What’s new in 1.3.43:** The Windows installer now completes correctly for **silent / automated installs** (the kind Microsoft uses in certification). That means the app shows up in **Start** with a clear shortcut, appears under **Settings → Apps** for removal, and the finish screen explains how to open and uninstall the program. **1.3.42** improvements (full app signing for strict Windows security) are unchanged.
 
 **[Download the Windows installer (latest release)](https://github.com/RootRecord/rootrecord-business-manager-download/releases/latest)**
 
@@ -259,6 +259,6 @@ For **how-to** detail that mirrors the buttons in the app, open **About & Help -
 ![RootRecord product mark](assets/github-icon.jpg)
 
 © RootRecord. All rights reserved.  
-*RootRecord Business Manager*  | Release documentation **v1.3.42**
+*RootRecord Business Manager*  | Release documentation **v1.3.43**
 
 </div>

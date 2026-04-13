@@ -21,8 +21,8 @@
 #define MyAppName "RootRecord Business Manager"
 #define MyAppDirName "RootRecord\Business Manager"
 #define MyPfRelDir "RootRecord\Business Manager"
-#define MyAppVersion "1.3.42"
-#define MyAppPublisher "RootRecord"
+#define MyAppVersion "1.3.43"
+#define MyAppPublisher "Root Record"
 #define MyAppCopyright "Copyright (C) 2026 RootRecord"
 #define MyAppId "{{A7B2E9F1-4C3D-5E6F-8091-2B3C4D5E6F70}"
 #define MyAppExeName "RootRecordBusinessManager.exe"
@@ -39,6 +39,8 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppCopyright={#MyAppCopyright}
 AppVerName={#MyAppName} {#MyAppVersion}
+; Explicit ARP / Settings list registration (default is yes; set for clarity and store certification).
+CreateUninstallRegKey=yes
 ; Per-machine install (admin): Program Files\RootRecord\Business Manager
 DefaultDirName={autopf}\{#MyPfRelDir}
 DefaultGroupName={#MyAppName}
@@ -68,6 +70,11 @@ SignedUninstaller=yes
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+; Plain-language pointers for certification (launch + uninstall) on the finish page.
+FinishedHeading=Installation complete
+FinishedLabel=RootRecord Business Manager is installed on this PC.%n%nTo open the app later: open the Start menu and look for the "RootRecord Business Manager" shortcut (or press the Windows key and type RootRecord).%n%nTo remove the app: open Windows Settings, go to Apps, then Installed apps, select RootRecord Business Manager, and choose Uninstall. You can also use Add or Remove Programs in Control Panel.
+
 [InstallDelete]
 ; Renamed entry binary (was RootRecord.exe); remove leftover on upgrade.
 Type: files; Name: "{app}\RootRecord.exe"
@@ -82,6 +89,8 @@ Source: "{#MyAppInstallerIcon}"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\favicon.ico"
+; Top-level Programs list entry (in addition to the per-publisher group) — easier for reviewers and users to find.
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\favicon.ico"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\favicon.ico"; Tasks: desktopicon
 
 [Run]
@@ -678,6 +687,19 @@ begin
   BusinessInfoPage2.Add('Timezone (e.g. system, UTC, America/New_York):', False);
   BusinessInfoPage2.Add('Invoice/payment notes:', False);
   BusinessInfoPage2.Values[4] := 'system';
+
+  { Microsoft Store / Partner Center certification typically installs with /VERYSILENT. The Terms page defaults
+    to "I do not agree", which breaks or blocks silent flows so setup never finishes — no ARP entry, no shortcuts,
+    and automated tests report "no launch method" + "no uninstall". Accept terms and use safe defaults. }
+  if WizardSilent() then
+  begin
+    AcceptedTerms := True;
+    if TermsAgreementPage <> nil then
+      TermsAgreementPage.SelectedValueIndex := 0;
+    EnablePreLaunchConfig := False;
+    if DataLocationPage <> nil then
+      DataLocationPage.SelectedValueIndex := 0;
+  end;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

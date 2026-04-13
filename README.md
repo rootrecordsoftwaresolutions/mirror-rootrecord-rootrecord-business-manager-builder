@@ -143,6 +143,10 @@ PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is gen
 
 ### Release history (builder)
 
+**1.3.43**
+
+- **Store / certification silent install:** `rootrecord.iss` — silent (`/VERYSILENT`) installs no longer leave Terms on “decline” by default; finish text documents launch + uninstall; extra Start-menu shortcut under Programs root; explicit `CreateUninstallRegKey=yes`; publisher string aligned to **Root Record** for ARP/Settings.
+
 **1.3.42**
 
 - **Smart App Control:** `sign_release_azure.ps1` signs **all** `*.exe`, `*.dll`, and `*.pyd` under `dist\RootRecordBusinessManager\` by default (opt out with **`-SkipBundledNative`**). File / product version bumped via **`app_version.py`** (PyInstaller version resource).
