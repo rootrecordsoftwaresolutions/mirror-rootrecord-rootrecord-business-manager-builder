@@ -6,6 +6,8 @@ venv/
 data/*.json
 data/*.db
 dist/
+# Local copy of public download repo (sync script targets sibling folder; ignore accidental nested clone)
+rootrecord-business-manager-download/
 build/output/
 build/build_rootrecord/
 build/msix/_stage/
