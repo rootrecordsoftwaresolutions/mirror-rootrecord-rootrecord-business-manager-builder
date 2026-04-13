@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title RootRecord — build exe and installer
+title RootRecord - build exe and installer
 
 REM Builds dist\RootRecordBusinessManager\RootRecordBusinessManager.exe (PyInstaller) and build\output\RootRecordSetup-*.exe (Inno Setup).
 REM Requires: Python on PATH with PyInstaller installed, Inno Setup 6 (ISCC.exe).

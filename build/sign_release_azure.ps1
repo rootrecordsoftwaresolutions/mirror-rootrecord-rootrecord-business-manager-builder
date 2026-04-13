@@ -18,6 +18,11 @@
 # (stops RootRecordBusinessManager.exe / RootRecord.exe before signing).
 # If the real path stays locked, signed sidecar is used unless you pass -NoSignedSidecar (writes Name.signed.exe).
 #
+# Smart App Control: a signed main .exe is not enough. SAC blocks unsigned PE code the process loads.
+# By default, when signing the app (-SkipExe:$false), this script scans every file under
+# dist\RootRecordBusinessManager and signs each PE binary it finds (by file header, not extension).
+# Use -SkipBundledNative to sign only the main exe (faster, not SAC-safe).
+#
 # Do not paste whole terminal transcripts (lines starting with PS>, "Signing:", errors) back into
 # PowerShell — run only a single command line, or use sign_release_azure.cmd from cmd.exe.
 
@@ -27,7 +32,8 @@ param(
     [switch] $SkipInstaller,
     [switch] $StopRunningApp,
     [string[]] $ExtraFiles,
-    [switch] $NoSignedSidecar
+    [switch] $NoSignedSidecar,
+    [switch] $SkipBundledNative
 )
 
 Set-StrictMode -Version Latest
@@ -95,6 +101,27 @@ function Test-SignToolVersion([string] $signToolPath) {
     [void][int]::TryParse($parts[2], [ref]$build)
     if ($build -lt 22621) {
         Write-Warning "SignTool file version $fv may be below the minimum (10.0.22621.x) for Artifact Signing. If signing fails, install a newer Windows SDK."
+    }
+}
+
+function Test-IsPortableExecutable([string] $path) {
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($fs.Length -lt 64) { return $false }
+        $br = New-Object System.IO.BinaryReader($fs)
+        $mz = $br.ReadUInt16()
+        if ($mz -ne 0x5A4D) { return $false } # MZ
+        $fs.Position = 0x3C
+        $peOffset = $br.ReadUInt32()
+        if ($peOffset -ge $fs.Length - 4) { return $false }
+        $fs.Position = [int64]$peOffset
+        $peSig = $br.ReadUInt32()
+        return ($peSig -eq 0x00004550) # "PE\0\0"
+    } catch {
+        return $false
+    } finally {
+        if ($fs) { $fs.Dispose() }
     }
 }
 
@@ -392,11 +419,29 @@ $signArgs = @(
 
 $targets = [System.Collections.Generic.List[string]]::new()
 if (-not $SkipExe) {
-    $exe = Join-Path $pkg "dist\RootRecordBusinessManager\RootRecordBusinessManager.exe"
-    if (Test-Path -LiteralPath $exe) {
-        $targets.Add((Resolve-Path -LiteralPath $exe).Path)
+    $distApp = Join-Path $pkg "dist\RootRecordBusinessManager"
+    $mainExe = Join-Path $distApp "RootRecordBusinessManager.exe"
+    if (-not $SkipBundledNative) {
+        if (Test-Path -LiteralPath $distApp) {
+            $bundleFiles = @(Get-ChildItem -LiteralPath $distApp -Recurse -File -ErrorAction SilentlyContinue | Sort-Object -Property FullName)
+            $peFiles = @($bundleFiles | Where-Object { Test-IsPortableExecutable $_.FullName })
+            if ($peFiles.Count -eq 0) {
+                Write-Warning "No signable PE binaries found under: $distApp"
+            } else {
+                Write-Host "Signing $($peFiles.Count) signable bundled binaries under dist (PE scan, Smart App Control)..." -ForegroundColor Cyan
+            }
+            foreach ($p in $peFiles) {
+                $targets.Add($p.FullName)
+            }
+        } else {
+            Write-Warning "Skip app bundle (folder not found): $distApp"
+        }
     } else {
-        Write-Warning "Skip app exe (not found): $exe"
+        if (Test-Path -LiteralPath $mainExe) {
+            $targets.Add((Resolve-Path -LiteralPath $mainExe).Path)
+        } else {
+            Write-Warning "Skip app exe (not found): $mainExe"
+        }
     }
 }
 if (-not $SkipInstaller) {
@@ -418,6 +463,15 @@ foreach ($f in $ExtraFiles) {
         $targets.Add((Resolve-Path -LiteralPath $f).Path)
     }
 }
+
+$seenTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$dedupTargets = [System.Collections.Generic.List[string]]::new()
+foreach ($t in $targets) {
+    if ($seenTargets.Add($t)) {
+        $dedupTargets.Add($t)
+    }
+}
+$targets = $dedupTargets
 
 if ($targets.Count -eq 0) {
     throw "Nothing to sign. Build the app and Inno installer first, or pass -ExtraFiles."

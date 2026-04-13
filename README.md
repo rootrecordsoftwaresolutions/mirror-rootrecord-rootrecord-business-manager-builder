@@ -143,9 +143,18 @@ PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is gen
 
 ### Release history (builder)
 
+**1.3.42**
+
+- **Smart App Control:** `sign_release_azure.ps1` signs **all** `*.exe`, `*.dll`, and `*.pyd` under `dist\RootRecordBusinessManager\` by default (opt out with **`-SkipBundledNative`**). File / product version bumped via **`app_version.py`** (PyInstaller version resource).
+
+**1.3.40**
+
+- **Trust / strict Windows:** With **`-Sign`** and **`artifact_signing_metadata.json`**, `build_windows.ps1` passes **`/DInnoSignAzure`** and **`/SAzureInno=...`** to ISCC so **`sign_inno_azure.ps1`** signs **Inno’s internal setup/uninstall binaries during compile**—not only the final `Setup.exe`. That addresses **Application Control Error 4551** (unsigned code under `%TEMP%`) and improves behavior on **default-security** PCs.
+- Build order unchanged: **app exe signed before Inno**; when Inno SignTool runs, **no second post-Inno sign** of the installer.
+
 **1.3.39**
 
-- **Windows signing:** `Build RootRecord.bat` runs **Azure Trusted Signing** by default (`build\sign_release_azure.ps1` + `artifact_signing_metadata.json`, gitignored—copy from `artifact_signing_metadata.sample.json`). The **app exe is signed before Inno** so Authenticode is **inside** the installer; the **installer .exe** is signed after compile. Use **`Build RootRecord.bat nosign`** for unsigned local builds.
+- **Windows signing:** `Build RootRecord.bat` runs **Azure Trusted Signing** by default (`build\sign_release_azure.ps1` + `artifact_signing_metadata.json`, gitignored—copy from `artifact_signing_metadata.sample.json`). The **app exe is signed before Inno** so Authenticode is **inside** the installer. Use **`Build RootRecord.bat nosign`** for unsigned local builds.
 - **Build reliability:** `build_windows.ps1` renames aside a locked `dist\RootRecordBusinessManager` tree before PyInstaller, checks Python exit code, and calls the sign script with real parameters (not string splats).
 - **Cursor / locks:** `.cursorignore` excludes `dist/` so the IDE is less likely to hold file handles during rebuilds.
 
@@ -301,6 +310,7 @@ Keeping version parity: use the **same tag** for both files; CI and local Linux 
 |--------|----------------|
 | PyInstaller fails | Delete `build/build_rootrecord/` and `dist/`, reinstall deps, rerun. |
 | PyInstaller `WinError 32` on `dist\…\exe` | Close Explorer on `dist\`, reload Cursor after `.cursorignore` includes `dist/`, or run the build from a plain **cmd** window outside the IDE. |
+| Inno **Error 4551** / Application Control / “temporary directory” | Signing only the final `Setup.exe` after compile leaves **unsigned** code Inno drops under `%TEMP%`. Use **`Build RootRecord.bat`** (default **`-Sign`**) with **`build\artifact_signing_metadata.json`** so **`build_windows.ps1`** passes **`/DInnoSignAzure`** + **`/SAzureInno=...`** to ISCC; that runs **`sign_inno_azure.ps1`** for each binary Inno needs. |
 | Inno Error 32 / locked file | Close Explorer preview of the output exe; use fallback name from log. |
 | Wrong version in Properties | Rebuild after editing `app_version.py`; spec embeds version on Windows. |
 

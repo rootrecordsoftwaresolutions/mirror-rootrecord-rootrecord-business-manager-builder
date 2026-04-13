@@ -11,13 +11,17 @@
 ; signtool (Windows SDK). For Azure Artifact Signing use sign_release_azure.ps1 (+ metadata JSON).
 ; EV certificates often get immediate SmartScreen trust; standard (OV) certs build reputation.
 ; Classic PFX flow: sign_release.example.ps1 in this folder.
-; Inno can also sign the installer via Sign Tool integration: https://jrsoftware.org/ishelp/topic_setup_signtool.htm
+;
+; Application Control / Error 4551 ("blocked in temporary directory"): signing only the final Setup.exe after
+; compile is NOT enough — Inno extracts an inner setup to %TEMP%. build_windows.ps1 -Sign passes /SAzureInno=...
+; so ISCC runs sign_inno_azure.ps1 for each binary Inno needs (see SignTool below).
+; Inno Sign Tool: https://jrsoftware.org/ishelp/topic_setup_signtool.htm
 
 ; GA display name. Canonical install/data-relative folder: RootRecord\Business Manager (no "Root Record\RootRecord..." duplication).
 #define MyAppName "RootRecord Business Manager"
 #define MyAppDirName "RootRecord\Business Manager"
 #define MyPfRelDir "RootRecord\Business Manager"
-#define MyAppVersion "1.3.39"
+#define MyAppVersion "1.3.42"
 #define MyAppPublisher "RootRecord"
 #define MyAppCopyright "Copyright (C) 2026 RootRecord"
 #define MyAppId "{{A7B2E9F1-4C3D-5E6F-8091-2B3C4D5E6F70}"
@@ -54,6 +58,12 @@ WizardSmallImageFile={#MyWizardSmallBmp}
 UsePreviousAppDir=yes
 ; Skip Select Destination when upgrading (Inno decides via previous install).
 DisableDirPage=auto
+; Azure SignTool only when ISCC is run with /DInnoSignAzure (build_windows.ps1 -Sign + metadata).
+; SignedUninstaller=yes: Inno's uninstaller .exe is signed with the same SignTool (keep with SignTool line).
+#ifdef InnoSignAzure
+SignTool=AzureInno
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

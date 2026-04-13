@@ -86,8 +86,40 @@ if (-not $iscc) {
     return
 }
 
-Write-Host "Compiling installer: $iss"
-$compileOutput = & $iscc $iss 2>&1
+$metaForInno = Join-Path $here "artifact_signing_metadata.json"
+$signInnoHook = Join-Path $here "sign_inno_azure.ps1"
+$innoAzureSign = $false
+if ($Sign -and (Test-Path -LiteralPath $metaForInno) -and (Test-Path -LiteralPath $signInnoHook)) {
+    $innoAzureSign = $true
+}
+
+# ISCC treats space-separated tokens on its command line as separate arguments. A /SAzureInno= value like
+# "powershell.exe -NoProfile ... -File \"long path\" $f" is easy to misparse as multiple args and triggers
+# "You may not specify more than one script filename." Fix: a tiny .cmd in %TEMP% (path has no spaces) that
+# forwards to sign_inno_azure.ps1; /SAzureInno=<wrapper.cmd> $f is one logical SignTool command.
+$isccBaseArgs = [System.Collections.Generic.List[string]]::new()
+if ($innoAzureSign) {
+    $wrapperCmd = Join-Path $env:TEMP "rr-inno-sign.cmd"
+    $ps1Full = (Resolve-Path -LiteralPath $signInnoHook).Path
+    $ps1ForCmd = $ps1Full.Replace('"', '""')
+    $cmdLines = @(
+        '@echo off',
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ps1ForCmd`" %*"
+    )
+    Set-Content -LiteralPath $wrapperCmd -Value $cmdLines -Encoding ascii
+    $isccBaseArgs.Add('/DInnoSignAzure')
+    $isccBaseArgs.Add('/SAzureInno=' + $wrapperCmd + ' $f')
+    Write-Host "Inno compile will Azure-sign setup internals (SignTool=AzureInno); wrapper: $wrapperCmd" -ForegroundColor Cyan
+} elseif ($Sign -and -not (Test-Path -LiteralPath $metaForInno)) {
+    Write-Warning "Signing requested but build\artifact_signing_metadata.json missing - Inno will not SignTool-sign internals; post-build sign only (may hit Application Control 4551)."
+}
+
+$issFull = (Resolve-Path -LiteralPath $iss).Path
+Write-Host "Compiling installer: $issFull"
+$isccAll = [System.Collections.Generic.List[string]]::new()
+foreach ($a in $isccBaseArgs) { $isccAll.Add($a) }
+$isccAll.Add($issFull)
+$compileOutput = @(& $iscc @($isccAll.ToArray()) 2>&1)
 $compileOutput | ForEach-Object { $_ }
 $failed = ($LASTEXITCODE -ne 0)
 $isLocked = ($compileOutput -join "`n") -match "Error 32"
@@ -95,7 +127,12 @@ if ($failed -and $isLocked) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $fallbackName = "RootRecordSetup-$stamp"
     Write-Warning "Installer output file is locked. Retrying as $fallbackName.exe"
-    & $iscc "/F$fallbackName" $iss
+    $retryAll = [System.Collections.Generic.List[string]]::new()
+    foreach ($a in $isccBaseArgs) { $retryAll.Add($a) }
+    $retryAll.Add("/F$fallbackName")
+    $retryAll.Add($issFull)
+    $retryOut = @(& $iscc @($retryAll.ToArray()) 2>&1)
+    $retryOut | ForEach-Object { $_ }
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup compile failed even after fallback filename retry."
     }
@@ -104,13 +141,15 @@ elseif ($failed) {
     throw "Inno Setup compile failed."
 }
 
-if ($Sign) {
-    Write-Host "Signing installer..." -ForegroundColor Cyan
+if ($Sign -and -not $innoAzureSign) {
+    Write-Host "Signing installer (post-Inno)..." -ForegroundColor Cyan
     if ($StopRunningApp) {
         & $signScript -SkipExe -StopRunningApp
     } else {
         & $signScript -SkipExe
     }
+} elseif ($Sign -and $innoAzureSign) {
+    Write-Host "Installer already signed during Inno compile (internals + output); skipping duplicate post-Inno sign." -ForegroundColor Green
 }
 
 Remove-RrDistBackupIfAny
