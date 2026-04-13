@@ -10,6 +10,6 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo MSIX output: build\output\RootRecord-BusinessManager-Beta_*.msix
+echo MSIX output: build\output\RootRecord-BusinessManager_*.msix
 pause
 exit /b 0

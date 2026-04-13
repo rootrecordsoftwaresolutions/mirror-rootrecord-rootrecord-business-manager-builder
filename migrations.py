@@ -232,12 +232,20 @@ FACTORY_APP_SETTINGS_DEFAULTS: dict[str, Any] = {
     "auto_backup_enabled": False,
     "auto_backup_interval_hours": 24,
     "last_backup_utc": "",
+    "cloud_backup_enabled": False,
+    "cloud_backup_api_base_url": "",
+    "cloud_backup_vault_token": "",
+    "cloud_backup_last_upload_utc": "",
+    "cloud_backup_last_source_mtime_ns": "0",
+    "cloud_backup_last_object_key": "",
+    "cloud_backup_last_error": "",
     "startup_clocked_in_prompt_enabled": True,
     "minimize_to_hidden_icons_enabled": False,
     "start_on_login_enabled": False,
     "multi_business_enabled": False,
     "active_business_id": 1,
     "last_app_closed_utc": "",
+    "trial_welcome_popup_shown": False,
 }
 
 FACTORY_QUICK_ACTION_SEEDS: tuple[tuple[str, str], ...] = (
@@ -835,6 +843,46 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE resource_entries SET business_id = 1 WHERE business_id IS NULL OR business_id = 0")
 
 
+def _migrate_v17(conn: sqlite3.Connection) -> None:
+    """Outbox for offline-first sync (pushed to the license/sync service when online)."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sync_outbox (
+          id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+          client_mutation_id TEXT NOT NULL UNIQUE,
+          user_id INTEGER NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_key TEXT NOT NULL,
+          op TEXT NOT NULL CHECK (op IN ('upsert', 'delete')),
+          payload_json TEXT NOT NULL,
+          created_at_utc TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+          last_error TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (user_id) REFERENCES rr_users (telegram_user_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending
+          ON sync_outbox (status, created_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_user
+          ON sync_outbox (user_id, status);
+        """
+    )
+
+
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    """Idempotency for applied remote sync events (avoids duplicates on pull)."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sync_applied_remote (
+          client_mutation_id TEXT NOT NULL PRIMARY KEY,
+          applied_at_utc TEXT NOT NULL,
+          reason TEXT NOT NULL DEFAULT 'applied'
+        );
+        """
+    )
+
+
 def _migrate_v16(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -973,6 +1021,18 @@ def run_migrations(cfg: "DbConfig", *, local_user_id: int = 1) -> None:
             _migrate_v16(conn)
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (16, ?)",
+                (now_utc_iso_text(),),
+            )
+        if 17 not in done:
+            _migrate_v17(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (17, ?)",
+                (now_utc_iso_text(),),
+            )
+        if 18 not in done:
+            _migrate_v18(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (18, ?)",
                 (now_utc_iso_text(),),
             )
         conn.commit()

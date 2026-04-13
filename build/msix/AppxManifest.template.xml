@@ -11,7 +11,7 @@
     Version="@@MSIX_VERSION@@"
     ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>RootRecord Business Manager (Beta)</DisplayName>
+    <DisplayName>RootRecord Business Manager</DisplayName>
     <PublisherDisplayName>RootRecord</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -25,9 +25,9 @@
     <rescap:Capability Name="runFullTrust" />
   </Capabilities>
   <Applications>
-    <Application Id="RootRecord" Executable="RootRecord.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="RootRecord" Executable="RootRecordBusinessManager.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="RootRecord Business Manager (Beta)"
+        DisplayName="RootRecord Business Manager"
         Description="Time, money, clients, inventory, and reports for your business."
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"

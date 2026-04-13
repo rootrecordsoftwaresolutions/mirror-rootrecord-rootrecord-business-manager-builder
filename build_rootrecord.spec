@@ -3,11 +3,11 @@
 # Windows:
 #   pip install pyinstaller
 #   pyinstaller --noconfirm build_rootrecord.spec
-#   → dist/RootRecord/RootRecord.exe
+#   → dist/RootRecordBusinessManager/RootRecordBusinessManager.exe
 #
 # Linux (see build/build_linux.sh):
 #   pyinstaller --noconfirm build_rootrecord.spec
-#   → dist/RootRecord/RootRecord
+#   → dist/RootRecordBusinessManager/RootRecordBusinessManager
 
 import importlib.util
 import os
@@ -33,11 +33,27 @@ spec_dir = os.path.dirname(os.path.abspath(SPEC))
 _favicon_repo = os.path.join(spec_dir, "favicon.ico")
 _favicon_ws = os.path.abspath(os.path.join(spec_dir, "..", "..", "favicon.ico"))
 icon_path = _favicon_repo if os.path.isfile(_favicon_repo) else _favicon_ws
+# About panel image: ship next to the app exe (not under user AppData). Prefer canonical name.
 _about_repo = os.path.join(spec_dir, "about_page_graphic.jpg")
 _about_ws = os.path.abspath(os.path.join(spec_dir, "..", "..", "about page grahic.jpg"))
 about_image_path = _about_repo if os.path.isfile(_about_repo) else _about_ws
 icon_datas = [(icon_path, ".")] if os.path.isfile(icon_path) else []
 about_datas = [(about_image_path, ".")] if os.path.isfile(about_image_path) else []
+_loading_dir = os.path.join(spec_dir, "build", "branding")
+_loading_image_path = ""
+if os.path.isdir(_loading_dir):
+    for _name in ("Loading.png", "Loading.jpg", "Loading.jpeg", "Loading.bmp", "Loading.webp"):
+        _p = os.path.join(_loading_dir, _name)
+        if os.path.isfile(_p):
+            _loading_image_path = _p
+            break
+loading_datas = (
+    [(_loading_image_path, "branding")] if _loading_image_path else []
+)
+_default_about_png = os.path.join(spec_dir, "assets", "about_panel_default.png")
+default_about_datas = (
+    [(_default_about_png, "assets")] if os.path.isfile(_default_about_png) else []
+)
 
 
 def _app_version_tuple_and_string() -> tuple[tuple[int, int, int, int], str]:
@@ -76,17 +92,17 @@ if sys.platform == "win32":
                             StringStruct("CompanyName", "RootRecord"),
                             StringStruct(
                                 "FileDescription",
-                                "RootRecord Business Manager (Beta)",
+                                "RootRecord Business Manager",
                             ),
                             StringStruct(
                                 "FileVersion",
                                 f"{_filevers[0]}.{_filevers[1]}.{_filevers[2]}.{_filevers[3]}",
                             ),
-                            StringStruct("InternalName", "RootRecord"),
-                            StringStruct("OriginalFilename", "RootRecord.exe"),
+                            StringStruct("InternalName", "RootRecordBusinessManager"),
+                            StringStruct("OriginalFilename", "RootRecordBusinessManager.exe"),
                             StringStruct(
                                 "ProductName",
-                                "RootRecord Business Manager (Beta)",
+                                "RootRecord Business Manager",
                             ),
                             StringStruct("ProductVersion", _prodver_str),
                         ],
@@ -104,7 +120,7 @@ a = Analysis(
     [os.path.join(spec_dir, "desktop_app.py")],
     pathex=[spec_dir],
     binaries=ctk_bins + mpl_bins,
-    datas=ctk_datas + mpl_datas + icon_datas + about_datas,
+    datas=ctk_datas + mpl_datas + icon_datas + about_datas + loading_datas + default_about_datas,
     hiddenimports=list(
         {
             *ctk_hidden,
@@ -122,15 +138,25 @@ a = Analysis(
             "suite_data",
             "help_text",
             "env_loader",
+            "log_config",
             "app_version",
             "license_gate",
             "license_config",
+            "license_shipped",
+            "backup_shipped",
+            "backup_r2_client",
             "license_client",
             "license_runtime",
             "httpx",
             "httpx._transports",
             "dotenv",
             "dotenv.main",
+            "PIL",
+            "PIL.Image",
+            "PIL.ImageDraw",
+            "PIL.ImageFont",
+            "pystray",
+            "pystray._win32",
         }
     ),
     hookspath=[],
@@ -161,7 +187,7 @@ elif sys.platform != "win32":
 
 _exe_kwargs = {
     "exclude_binaries": True,
-    "name": "RootRecord",
+    "name": "RootRecordBusinessManager",
     "debug": False,
     "bootloader_ignore_signals": False,
     "strip": False,
@@ -193,5 +219,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="RootRecord",
+    name="RootRecordBusinessManager",
 )

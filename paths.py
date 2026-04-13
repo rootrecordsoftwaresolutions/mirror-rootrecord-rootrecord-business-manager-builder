@@ -12,6 +12,45 @@ _PKG_DIR = Path(__file__).resolve().parent
 _WORKSPACE_ROOT = _PKG_DIR.parent.parent
 
 
+def iter_app_bundle_asset_dirs() -> list[Path]:
+    """Dirs that ship with the application (PyInstaller bundle, install folder, or package tree).
+
+    Excludes user data paths such as ``%LOCALAPPDATA%\\RootRecord`` and Documents — use this for
+    icons and About/splash images that belong beside the program, not in the workspace database tree.
+    """
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(p)
+
+    if hasattr(sys, "_MEIPASS"):
+        add(Path(sys._MEIPASS))
+    if getattr(sys, "frozen", False):
+        add(Path(sys.executable).resolve().parent)
+    add(_PKG_DIR)
+    return dirs
+
+
+def resolve_shipped_asset(*names: str) -> Path | None:
+    """First existing file under :func:`iter_app_bundle_asset_dirs` matching one of the basenames.
+
+    Checks the bundle root and ``branding/`` (PyInstaller ships ``Loading.*`` there).
+    """
+    for name in names:
+        for d in iter_app_bundle_asset_dirs():
+            for candidate in (d / name, d / "branding" / name):
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
 def _rootrecord_home_override() -> Path | None:
     env = os.environ.get("ROOTRECORD_HOME", "").strip()
     if env:

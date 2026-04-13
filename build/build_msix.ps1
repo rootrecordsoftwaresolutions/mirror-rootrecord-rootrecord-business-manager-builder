@@ -1,4 +1,4 @@
-# Build an MSIX from PyInstaller output (dist\RootRecord) for Microsoft Store submission.
+# Build an MSIX from PyInstaller output (dist\RootRecordBusinessManager) for Microsoft Store submission.
 # Requires: Windows SDK (MakeAppx.exe), PyInstaller build already done.
 #
 # Before Partner Center upload:
@@ -13,13 +13,14 @@ $ErrorActionPreference = "Stop"
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pkg = Resolve-Path (Join-Path $here "..")
-$dist = Join-Path $pkg "dist\RootRecord"
+$dist = Join-Path $pkg "dist\RootRecordBusinessManager"
 $template = Join-Path $here "msix\AppxManifest.template.xml"
 $staging = Join-Path $here "msix\_stage"
 $outDir = Join-Path $here "output"
 
 # --- Match Partner Center reserved identity (edit before shipping) ---
-$identityName = "RootRecord.RootRecordBusinessManagerBeta"
+# If you already published under RootRecordBusinessManagerBeta, keep that value until Partner Center is updated.
+$identityName = "RootRecord.RootRecordBusinessManager"
 # Placeholder publisher (must be replaced with your Store publisher subject, e.g. CN=...)
 $publisher = "CN=RootRecord"
 
@@ -87,7 +88,7 @@ if (-not $makeappxPath) {
     Write-Error "makeappx.exe not found. Install Windows 10/11 SDK (Desktop development with C++ includes it)."
 }
 
-$outMsix = Join-Path $outDir "RootRecord-BusinessManager-Beta_$msixVersion.msix"
+$outMsix = Join-Path $outDir "RootRecord-BusinessManager_$msixVersion.msix"
 Write-Host "Packing: $outMsix"
 & $makeappxPath pack /h sha256 /o /d $staging /p $outMsix
 if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed with exit code $LASTEXITCODE" }

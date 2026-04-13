@@ -88,7 +88,7 @@ ABOUT
 
 TIPS
 ----
-• If totals looked “too high” before, overlapping duplicate rows were the usual cause; the app now merges time for summaries. You can still delete or merge rows from Work Log (Bulk Edit).
+• If totals looked “too high” before, overlapping duplicate rows were the usual cause; the app now merges time for summaries. In Work Log, use Bulk Edit: tick entries in that dialog, set actions (delete, merge, shift time, category/project), then Apply Bulk Edit. Selection is only by those checkboxes, not the main table.
 • For invoices, always click “Save line items” after editing the multiline editor.
 • Restart the app after updates so database migrations can run.
 

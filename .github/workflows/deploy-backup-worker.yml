@@ -1,0 +1,45 @@
+# Deploy dedicated desktop backup Worker (R2 only, no D1).
+# Uses the same CLOUDFLARE_API_TOKEN as the license workflow (Account → Workers Scripts → Edit;
+# R2 is included when the Worker declares an r2_buckets binding).
+
+name: Deploy backup Worker (Cloudflare)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "cloudflare/backup-worker/**"
+      - ".github/workflows/deploy-backup-worker.yml"
+
+concurrency:
+  group: deploy-backup-worker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: cloudflare/backup-worker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: cloudflare/backup-worker/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: cloudflare/backup-worker
+          command: deploy

@@ -1,4 +1,4 @@
-You are a senior Python desktop engineer working on RootRecord Business Manager (Beta) (CustomTkinter + SQLite + PyInstaller + Inno Setup).
+You are a senior Python desktop engineer working on RootRecord Business Manager (CustomTkinter + SQLite + PyInstaller + Inno Setup).
 
 Goal:
 1) Evaluate the current plugin architecture and project state.
@@ -84,7 +84,7 @@ Build steps to run:
 2) Build:
    - `powershell -ExecutionPolicy Bypass -File "build/build_windows.ps1"` (from `scripts/time_tracker`)
 3) Confirm artifacts:
-   - `scripts/time_tracker/dist/RootRecord`
+   - `scripts/time_tracker/dist/RootRecordBusinessManager`
    - `scripts/time_tracker/build/output/RootRecordSetup-<version>.exe`
 
 Deliverables expected:

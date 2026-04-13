@@ -1,3 +1,3 @@
 @echo off
-REM Wrapper: runs the full build (PyInstaller exe + Inno Setup installer).
-call "%~dp0build\build_rootrecord.bat"
+REM Double-click = build + Azure sign. To build only without signing: Build RootRecord.bat nosign
+call "%~dp0build\build_rootrecord.bat" %*

@@ -1,0 +1,9 @@
+name = "rootrecord-desktop-backup"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+account_id = "ec0a927534948eaade3c4ed6cad4172c"
+
+# Same bucket as before (optional separate bucket: change name + create with wrangler r2 bucket create).
+[[r2_buckets]]
+binding = "BACKUPS"
+bucket_name = "rootrecord-desktop-backups"

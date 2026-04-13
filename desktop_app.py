@@ -10,6 +10,10 @@ from env_loader import load_rootrecord_env
 
 load_rootrecord_env()
 
+from log_config import configure_rootrecord_logging
+
+configure_rootrecord_logging()
+
 
 def main() -> None:
     from ui_main import run_app

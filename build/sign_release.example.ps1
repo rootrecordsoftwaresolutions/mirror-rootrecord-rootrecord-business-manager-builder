@@ -1,4 +1,5 @@
-# Example: sign RootRecord.exe and the Inno installer with an Authenticode certificate.
+# Example: sign RootRecordBusinessManager.exe and the Inno installer with a classic PFX-based Authenticode cert.
+# For Azure Artifact Signing (Trusted Signing), use sign_release_azure.ps1 instead.
 # This is what removes "Unknown publisher" and reduces Microsoft SmartScreen warnings.
 #
 # Prerequisites:
@@ -12,7 +13,7 @@
 #
 # Or use a hardware token / Windows certificate store instead of PFX (see signtool /sha1).
 #
-# Sign order: sign RootRecord.exe before compiling the installer, OR sign both exe and Setup.exe after build.
+# Sign order: sign RootRecordBusinessManager.exe before compiling the installer, OR sign both exe and Setup.exe after build.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -33,7 +34,7 @@ if (-not $signtool) {
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pkg = Resolve-Path (Join-Path $here "..")
-$exe = Join-Path $pkg "dist\RootRecord\RootRecord.exe"
+$exe = Join-Path $pkg "dist\RootRecordBusinessManager\RootRecordBusinessManager.exe"
 $setup = Get-ChildItem -Path (Join-Path $here "output") -Filter "RootRecordSetup-*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
 $stamp = "http://timestamp.digicert.com"

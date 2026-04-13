@@ -1,4 +1,5 @@
-# Publishes the Inno installer as a GitHub Release (uploads the .exe only; source stays in git).
+# Publishes the Inno installer as a GitHub Release for the **private builder** repo (uploads the .exe only).
+# For the customer-facing repo + readme, use publish_product_release.ps1 (RootRecord/rootrecord-business-manager-download).
 #
 # First-time setup (once per machine):
 #   1. Add the project folder as a git repo and push to GitHub, OR clone your repo locally.
@@ -10,7 +11,7 @@
 #   cd "...\Root Record Business Manager\build"
 #   .\publish_github_release.ps1
 #
-# Optional:  .\publish_github_release.ps1 -InstallerPath "C:\path\RootRecordSetup-Beta-1.3.22.exe" -Draft
+# Optional:  .\publish_github_release.ps1 -InstallerPath "C:\path\RootRecordSetup-1.3.22.exe" -Draft
 #
 # Requires: GitHub CLI (winget install GitHub.cli). Uses APP_VERSION in ..\app_version.py unless -Version is set.
 
@@ -56,7 +57,7 @@ if (-not $Version) {
 $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
 
 if (-not $InstallerPath) {
-    $defaultName = "RootRecordSetup-Beta-$Version.exe"
+    $defaultName = "RootRecordSetup-$Version.exe"
     $InstallerPath = Join-Path $here "output\$defaultName"
 }
 
@@ -85,7 +86,7 @@ Verify in PowerShell:
   Get-FileHash -LiteralPath '$exeName' -Algorithm SHA256
 "@
 
-$releaseTitle = if ($Title) { $Title } else { "RootRecord Business Manager $Version (Beta)" }
+$releaseTitle = if ($Title) { $Title } else { "RootRecord Business Manager $Version" }
 
 $argList = @(
     "release", "create", $tag

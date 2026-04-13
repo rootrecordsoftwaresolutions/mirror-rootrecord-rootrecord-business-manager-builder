@@ -1,7 +1,7 @@
 """Load .env before other modules (especially paths.py) read os.environ.
 
 Development: optional %%LOCALAPPDATA%%\\RootRecord\\.env, then project .env (last wins).
-PyInstaller: same broad-to-narrow merge; .env next to RootRecord.exe wins over AppData.
+PyInstaller: same broad-to-narrow merge; .env next to the app executable wins over AppData.
 """
 
 from __future__ import annotations

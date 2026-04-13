@@ -4,7 +4,7 @@ Trial + entitlement + **Stripe Checkout + webhooks** (updates `subscription_stat
 
 ## Deploy without local terminals (recommended)
 
-CI deploys the Worker and applies D1 migrations when you **push to `main`** (only when `cloudflare/**` changes) or run the workflow manually.
+CI deploys the **license** Worker and applies D1 migrations when you **push to `main`** (paths under `cloudflare/src/`, `cloudflare/wrangler.toml`, etc. — see `.github/workflows/deploy-license-api.yml`) or run **Deploy license API (Cloudflare)** manually. The **backup** Worker deploys from **`cloudflare/backup-worker/`** via **Deploy backup Worker (Cloudflare)** (or push touching that folder).
 
 ### One-time: Cloudflare + GitHub
 
@@ -14,7 +14,7 @@ CI deploys the Worker and applies D1 migrations when you **push to `main`** (onl
 4. **Account ID** is already in **`cloudflare/wrangler.toml`** as `account_id` (no GitHub secret for it).
 5. **GitHub** (this repo) → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
    - `CLOUDFLARE_API_TOKEN` — the token string from step 3  
-   - Optional: `LICENSE_API_SECRET` — long random string; if set, CI runs `wrangler secret put` so the Worker requires `Authorization: Bearer …` (same value in your app config).
+   - **`LICENSE_API_SECRET`** — long random string; CI runs `wrangler secret put` so the Worker accepts `Authorization: Bearer …` on **`/v1/entitlement`** and **`/v1/billing/checkout`**. Use the **same** value as `LICENSE_API_SECRET` in the desktop app `.env`. **Required** for those routes (503 if unset).
 
 6. Push to `main` (or **Actions** → **Deploy license API (Cloudflare)** → **Run workflow**). When green, use the Worker URL from the deploy log (or **Workers & Pages** → **rootrecord-license**).
 
@@ -48,7 +48,7 @@ If the UI labels differ slightly, search the permission picker for **Workers Scr
 | Secret | Purpose |
 |--------|---------|
 | `CLOUDFLARE_API_TOKEN` | Deploy Worker + run D1 migrations |
-| `LICENSE_API_SECRET` | Optional; syncs Bearer secret for `/v1/entitlement` |
+| `LICENSE_API_SECRET` | **Required** for `/v1/*`; CI syncs Bearer secret (same as app `.env`) |
 
 ---
 
@@ -73,7 +73,31 @@ After deploy, add these under **Workers → rootrecord-license → Settings → 
 
 Copy the **Signing secret** (`whsec_…`) into **`STRIPE_WEBHOOK_SECRET`** on the Worker, then **redeploy** (or save — secrets bind on next deploy).
 
-**Desktop app:** read-only footer shows **Subscribe / billing** → opens Stripe Checkout (`POST /v1/billing/checkout` with the same Bearer as entitlement).
+**Desktop app:** read-only footer shows **Activate Services** → opens Stripe Checkout (`POST /v1/billing/checkout` with the same Bearer as entitlement).
+
+**CORS (optional):** set Worker variable **`CORS_ALLOW_ORIGIN`** to a single origin (e.g. `https://your-site.com`) to restrict `Access-Control-Allow-Origin`. If unset, the Worker uses `*` (desktop app is unaffected).
+
+---
+
+## Desktop DB cloud copies (dedicated Worker + R2)
+
+Implemented in **`cloudflare/backup-worker/`** (Worker name default: `rootrecord-desktop-backup`). This is **separate** from the license Worker: no D1, no `LICENSE_API_SECRET`, no account session. The desktop app stores a random vault token locally and sends `Authorization: Bearer <that token>` to `PUT /v1/backup/upload`.
+
+1. **Create an R2 bucket** if you do not have one (default name **`rootrecord-desktop-backups`**, must match `backup-worker/wrangler.toml`):  
+   `cd cloudflare/backup-worker && npx wrangler r2 bucket create rootrecord-desktop-backups`
+2. **`npm install`** in `cloudflare/backup-worker/`, then **`npm run deploy`** (or GitHub Actions workflow **Deploy backup Worker (Cloudflare)**).
+3. **Optional Worker secret** `BACKUP_VAULT_PEPPER` — mixed into SHA-256 for the object prefix; not required for dev.
+
+**Routes (backup Worker only)**
+
+| Method | Path | Auth |
+|--------|------|------|
+| `GET` | `/v1/backup/health` | None — returns `{ ok, r2: "ready" \| "unconfigured" }` |
+| `PUT` | `/v1/backup/upload` | `Authorization: Bearer <vault_token>` (min 24 chars). Body = raw SQLite bytes. Header `X-RootRecord-Filename: name.sqlite3` |
+
+Objects are stored as `v/<sha256>/<iso>-<filename>`.
+
+**Desktop:** Program Settings shows only an on/off toggle for cloud backup. URL resolution: **`ROOTRECORD_BACKUP_API_BASE_URL`** (env) → **`backup_shipped.SHIPPED_BACKUP_API_BASE_URL`** → optional DB override → legacy license Worker host (only if that Worker still exposes `/v1/backup/*`). Set **`SHIPPED_BACKUP_API_BASE_URL`** to your deployed backup Worker URL before shipping installers.
 
 ---
 

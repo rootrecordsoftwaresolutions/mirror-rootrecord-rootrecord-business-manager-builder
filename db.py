@@ -210,6 +210,12 @@ def insert_time_entry(
             (user_id, machine_session_id, start, end, category, description, created),
         )
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return int(cur.lastrowid)
     finally:
         conn.close()
@@ -274,6 +280,12 @@ def insert_rich_time_entry(
                     (eid, tid),
                 )
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return eid
     finally:
         conn.close()
@@ -284,6 +296,8 @@ def insert_session_event(
     user_id: int,
     event_type: str,
     detail: str,
+    *,
+    skip_sync_enqueue: bool = False,
 ) -> None:
     conn = connect(cfg)
     try:
@@ -295,6 +309,19 @@ def insert_session_event(
             (user_id, event_type, detail, now_utc_iso_text()),
         )
         conn.commit()
+        if not skip_sync_enqueue:
+            try:
+                from sync_engine import enqueue_session_activity
+
+                enqueue_session_activity(cfg, user_id, event_type, detail)
+            except Exception:
+                pass
+            try:
+                from sync_engine import notify_data_changed
+
+                notify_data_changed(cfg, local_user_id=int(user_id))
+            except Exception:
+                pass
     finally:
         conn.close()
 
@@ -327,7 +354,7 @@ def fetch_time_entries_for_user(
                        work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency
                 FROM rr_time_entries
                 WHERE user_id = ?
-                ORDER BY start_utc ASC
+                ORDER BY start_utc ASC, id ASC
                 """,
                 (user_id,),
             )
@@ -339,7 +366,7 @@ def fetch_time_entries_for_user(
                        work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency
                 FROM rr_time_entries
                 WHERE user_id = ? AND start_utc >= ?
-                ORDER BY start_utc ASC
+                ORDER BY start_utc ASC, id ASC
                 """,
                 (user_id, since_txt),
             )

@@ -7,3 +7,5 @@ account_id = "ec0a927534948eaade3c4ed6cad4172c"
 binding = "DB"
 database_name = "rootrecord_license"
 database_id = "a25063b7-cf0f-460f-9bb4-d06f270a4e65"
+
+# Desktop cloud backups live on a dedicated Worker: see cloudflare/backup-worker/

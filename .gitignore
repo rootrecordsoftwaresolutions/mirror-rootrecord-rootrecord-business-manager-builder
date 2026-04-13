@@ -9,7 +9,10 @@ dist/
 build/output/
 build/build_rootrecord/
 build/msix/_stage/
-.firebase/
+build/artifact_signing_metadata.json
+build/azure_tenant_id.txt
 cloudflare/node_modules/
 cloudflare/.wrangler/
 cloudflare/.dev.vars
+.vscode/
+cloudflare/backup-worker/node_modules/

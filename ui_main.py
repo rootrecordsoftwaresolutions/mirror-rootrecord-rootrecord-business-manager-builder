@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import logging
 import math
 import sys
 import json
@@ -14,11 +15,13 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 import tkinter as tk
 import webbrowser
+from urllib.parse import quote
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import colorchooser, filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox, ttk
 try:
     import winreg
 except ImportError:  # non-Windows
@@ -64,6 +67,7 @@ from data_api import (
     list_available_funds_accounts,
     set_available_funds_account_archived,
     available_funds_totals_by_currency,
+    ledger_net_totals_by_currency,
     list_scheduled_expenses,
     run_due_scheduled_expenses,
     set_scheduled_expense_active,
@@ -104,6 +108,7 @@ from db import (
 )
 from app_version import APP_VERSION
 from export_sheet import build_hours_csv_bytes_between
+from branding_theme import BrandingPalette, get_branding_palette, iter_loading_image_paths
 from help_text import USER_GUIDE
 from migrations import (
     FACTORY_APP_SETTINGS_DEFAULTS,
@@ -143,7 +148,11 @@ from suite_data import (
     write_invoice_pdf,
     local_input_to_utc_naive_iso,
 )
-from paths import user_records_dir, workspace_root
+from paths import (
+    iter_app_bundle_asset_dirs,
+    resolve_shipped_asset,
+    user_records_dir,
+)
 from storage import (
     ensure_user_layout,
     get_machine_session_db_id,
@@ -237,12 +246,19 @@ def _default_activity_category_label(names: list[str]) -> str:
 
 
 class RootRecordApp(ctk.CTk):
-    def __init__(self, cfg: DbConfig) -> None:
+    def __init__(self, cfg: DbConfig, startup_splash: Any | None = None) -> None:
         super().__init__()
         self.cfg = cfg
+        try:
+            from backup_r2_client import bootstrap_cloud_backup_if_enabled
+
+            bootstrap_cloud_backup_if_enabled(self.cfg)
+        except Exception:
+            pass
+        self._startup_splash = startup_splash
         self.uid = LOCAL_USER_ID
         self._last_activity_desc = ""
-        self._active_prompt_popup: ctk.CTkToplevel | None = None
+        self._active_prompt_popup: tk.Toplevel | None = None
         self._prompt_job_id: str | None = None
         # Single deferred "show check-in soon" callback from _resume_prompts_if_working_now (avoid stacking).
         self._prompt_immediate_job: str | None = None
@@ -256,13 +272,27 @@ class RootRecordApp(ctk.CTk):
         # Keep UI consistently readable; avoid overly bright light mode.
         ctk.set_appearance_mode("dark")
         settings_set(self.cfg, "theme", "dark")
-        self._theme_bg = "#070d14"
-        self._theme_sidebar = "#0d1622"
-        self._theme_panel = "#111c29"
-        self._theme_nav_idle = "#142131"
-        self._theme_nav_active = "#1f3448"
-        self._theme_hover = "#28445f"
-        self._theme_accent = "#2ea7b8"
+        _pal = get_branding_palette()
+        self._theme_bg = _pal.bg
+        self._theme_sidebar = _pal.sidebar
+        self._theme_panel = _pal.panel
+        self._theme_nav_idle = _pal.nav_idle
+        self._theme_nav_active = _pal.nav_active
+        self._theme_hover = _pal.hover
+        self._theme_accent = _pal.accent
+        self._theme_text_muted = _pal.text_muted
+        self._theme_text_secondary = _pal.text_secondary
+        self._theme_text_heading = _pal.text_heading
+        self._theme_help_btn_bg = _pal.help_icon_bg
+        self._theme_help_btn_fg = _pal.help_icon_fg
+        self._theme_border_subtle = _pal.border_subtle
+        self._theme_billing_hero_sub = _pal.billing_hero_sub
+        self._theme_billing_card_title = _pal.billing_card_title
+        self._theme_billing_row_label = _pal.billing_row_label
+        self._theme_billing_hint = _pal.billing_hint
+        self._theme_chart_bg = _pal.chart_bg
+        self._theme_chart_fg = _pal.chart_fg
+        self._theme_chart_edge = _pal.chart_edge
         # Flatten default widget surfaces to remove shaded gradients/bands.
         try:
             theme = ctk.ThemeManager.theme
@@ -273,6 +303,7 @@ class RootRecordApp(ctk.CTk):
         except Exception:
             pass
         self.configure(fg_color=self._theme_bg)
+        self._pump_startup_splash()
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -295,14 +326,14 @@ class RootRecordApp(ctk.CTk):
             command=self._toggle_sidebar,
             fg_color=self._theme_nav_idle,
             hover_color=self._theme_hover,
+            border_width=0,
         )
         self._sidebar_toggle_btn.pack(side="right", padx=(8, 0))
         ctk.CTkLabel(
             side,
-            text="Your grounding root for business productivity",
+            text="Your grounding root for\nbusiness productivity",
             font=ctk.CTkFont(size=12),
-            text_color="gray",
-            wraplength=190,
+            text_color=self._theme_text_muted,
             justify="left",
         ).pack(padx=16, anchor="w")
         self._active_business_var = tk.StringVar(value="Master (All Businesses)")
@@ -314,7 +345,7 @@ class RootRecordApp(ctk.CTk):
             command=self._on_business_profile_change,
             width=188,
         )
-        self._profile_label = ctk.CTkLabel(side, text="Profile", text_color="gray", font=ctk.CTkFont(size=11))
+        self._profile_label = ctk.CTkLabel(side, text="Profile", text_color=self._theme_text_muted, font=ctk.CTkFont(size=11))
         self._profile_label.pack(
             padx=16, anchor="w", pady=(8, 2)
         )
@@ -329,6 +360,7 @@ class RootRecordApp(ctk.CTk):
             "Reports",
             "Account Settings",
             "About & Help",
+            "Billing",
             "Program Settings",
         )
         self._nav_buttons: dict[str, ctk.CTkButton] = {}
@@ -337,14 +369,14 @@ class RootRecordApp(ctk.CTk):
         nav_groups: tuple[tuple[str, tuple[str, ...]], ...] = (
             ("Overview", ("Dashboard", "Work Log", "Reports")),
             ("Operations", ("Finance & Clients", "Schedule & Bookings", "Stock & Supplies")),
-            ("System", ("Account Settings", "Program Settings", "About & Help")),
+            ("System", ("Account Settings", "Program Settings", "About & Help", "Billing")),
         )
         for group_name, group_items in nav_groups:
             ctk.CTkLabel(
                 nav,
                 text=group_name.upper(),
                 font=ctk.CTkFont(size=11, weight="bold"),
-                text_color="gray",
+                text_color=self._theme_text_muted,
             ).pack(anchor="w", padx=4, pady=(8, 2))
             for name in group_items:
                 btn = ctk.CTkButton(
@@ -359,7 +391,9 @@ class RootRecordApp(ctk.CTk):
                 btn.pack(fill="x", pady=3)
                 self._nav_buttons[name] = btn
 
-        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        # Solid fill so rounded `place()` widgets (sidebar restore) do not show dark square corners
+        # against a transparent parent (CustomTkinter alpha quirk on Windows).
+        self._body = ctk.CTkFrame(self, fg_color=self._theme_bg, corner_radius=0, border_width=0)
         self._body.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
         self._body.grid_rowconfigure(0, weight=1)
         self._body.grid_columnconfigure(0, weight=1)
@@ -375,6 +409,7 @@ class RootRecordApp(ctk.CTk):
         self._process_status_var = tk.StringVar(value="")
         self._process_status_label = ctk.CTkLabel(
             self,
+            text=self._process_status_var.get(),
             textvariable=self._process_status_var,
             fg_color=self._theme_nav_active,
             corner_radius=8,
@@ -391,6 +426,7 @@ class RootRecordApp(ctk.CTk):
             command=self._toggle_sidebar,
             fg_color=self._theme_nav_idle,
             hover_color=self._theme_hover,
+            border_width=0,
         )
         self._sidebar_restore_btn.place_forget()
         for name in self._nav_items:
@@ -441,108 +477,448 @@ class RootRecordApp(ctk.CTk):
         self._build_reports()
         self._build_account()
         self._build_help()
+        self._build_billing()
         self._build_settings()
         self._switch_nav("Dashboard")
+        self._pump_startup_splash()
 
-        foot = ctk.CTkFrame(self, height=28, fg_color="transparent")
-        foot.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 6))
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 8))
+        self._license_footer_banner_lbl = None
         try:
             import license_gate as _license_gate
 
-            if _license_gate.is_read_only():
-                ctk.CTkLabel(
-                    foot,
-                    text="Read-only — trial ended or subscription inactive. View and export only.",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color="#e6c35c",
-                ).pack(anchor="w", pady=(0, 4))
-                sub_row = ctk.CTkFrame(foot, fg_color="transparent")
-                sub_row.pack(anchor="w", pady=(0, 4))
-                ctk.CTkButton(
-                    sub_row,
-                    text="Subscribe / billing",
-                    width=168,
-                    fg_color=self._theme_accent,
-                    hover_color=self._theme_hover,
-                    command=self._on_subscribe_billing,
-                ).pack(side="left")
+            from license_client import license_footer_hints
+            from license_config import get_license_api_config
+
+            api_on = bool(get_license_api_config())
+            hints = license_footer_hints(api_configured=api_on) if api_on else None
+            banner_line = hints.line if hints else None
+            banner_warn = bool(hints and hints.warn)
+            show_sub = bool(hints and hints.show_subscribe)
+            tick_trial = bool(hints and hints.tick_trial)
+            if not banner_line and api_on and _license_gate.is_read_only():
+                banner_line = (
+                    "Read-only — trial ended or subscription inactive. View and export only."
+                )
+                banner_warn = True
+                show_sub = True
+            if banner_line or show_sub:
+                lic_row = ctk.CTkFrame(foot, fg_color="transparent")
+                lic_row.pack(fill="x", anchor="w")
+                if show_sub:
+                    sub_btn = ctk.CTkButton(
+                        lic_row,
+                        text="Activate Services",
+                        width=178,
+                        fg_color=self._theme_accent,
+                        hover_color=self._theme_hover,
+                        border_width=0,
+                        command=self._on_subscribe_billing,
+                    )
+                    sub_btn.pack(side="right")
+                    self._attach_tooltip(
+                        sub_btn,
+                        "Opens Stripe Checkout in your browser to purchase or manage your subscription.",
+                    )
+                if banner_line:
+                    self._license_banner_var = tk.StringVar(value=banner_line)
+                    if banner_warn:
+                        banner_color = "#e6c35c"
+                    elif tick_trial:
+                        banner_color = "#ffffff"
+                    else:
+                        banner_color = self._theme_accent
+                    self._license_footer_banner_lbl = ctk.CTkLabel(
+                        lic_row,
+                        text=self._license_banner_var.get(),
+                        textvariable=self._license_banner_var,
+                        font=ctk.CTkFont(size=12, weight="bold"),
+                        text_color=banner_color,
+                        wraplength=1200,
+                        justify="left",
+                        anchor="w",
+                    )
+                    self._license_footer_banner_lbl.pack(side="left", fill="x", expand=True, padx=(0, 10))
+                    if tick_trial:
+                        self.after(60_000, self._refresh_license_banner_text)
         except Exception:
             pass
-        self._foot_var = tk.StringVar(value=_data_footer_line(cfg))
-        ctk.CTkLabel(foot, textvariable=self._foot_var, font=ctk.CTkFont(size=11), text_color="gray").pack(
-            anchor="w"
-        )
+        self._purge_footer_ctk_label_placeholders()
+
+        self._pump_startup_splash()
+        self._startup_splash = None
 
         self._schedule_prompts()
         self.after(1200, self._auto_backup_if_due)
+        self.after(90_000, self._cloud_backup_tick)
         self.after(900, self._show_startup_clocked_in_notice_if_needed)
         self.after(500, self._refresh_dashboard)
+        self.after(2000, self._maybe_show_trial_welcome_popup)
+        self.after(4000, self._github_update_check_on_startup_deferred)
+        self.after(20_000, self._sync_cloud_tick)
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.bind("<Unmap>", self._on_window_unmap)
         self._schedule_dashboard_clock_live_refresh()
 
-    def _on_subscribe_billing(self) -> None:
-        """Open Stripe Checkout (Worker must have Stripe secrets + price id)."""
-        try:
-            from license_client import create_checkout_session
-            from license_config import get_license_api_config
-        except ImportError as exc:
-            messagebox.showerror("RootRecord", str(exc))
-            return
-        if not get_license_api_config():
-            messagebox.showinfo("RootRecord", "License API is not configured (LICENSE_API_BASE_URL).")
-            return
-        email = (settings_get(self.cfg, "license_account_email", "") or "").strip() or (
-            os.environ.get("LICENSE_EMAIL") or ""
-        ).strip()
-        if not email:
-            messagebox.showerror(
-                "RootRecord",
-                "No email for billing. Set LICENSE_EMAIL in .env or complete license sign-in first.",
-            )
+    def _pump_startup_splash(self) -> None:
+        s = getattr(self, "_startup_splash", None)
+        if s is None:
             return
         try:
-            url = create_checkout_session(email)
-            if url:
-                webbrowser.open(url)
-        except Exception as exc:
-            messagebox.showerror("RootRecord", f"Could not start checkout:\n{exc}")
-
-    def _apply_app_icon(self) -> None:
-        candidates: list[Path] = []
-        if getattr(sys, "frozen", False):
-            candidates.append(Path(sys.executable).resolve().parent / "favicon.ico")
-        candidates.append(Path(__file__).resolve().parent / "favicon.ico")
-        candidates.append(Path(__file__).resolve().parents[2] / "favicon.ico")
-        try:
-            candidates.append(Path(workspace_root()) / "favicon.ico")
+            s.update_idletasks()
+            s.update()
         except Exception:
             pass
-        for ico in candidates:
-            try:
-                if ico.is_file():
-                    self.iconbitmap(default=str(ico))
+
+    def _purge_footer_ctk_label_placeholders(self) -> None:
+        """Footer labels use text=\"\" at creation; do not configure(text=\"\") here — it clears StringVar display on CTkLabel."""
+        return
+
+    def _github_update_check_on_startup_deferred(self) -> None:
+        if not bool(settings_get(self.cfg, "github_update_check_enabled", True)):
+            return
+        try:
+            from github_update_check import compare_semver
+
+            dis = str(settings_get(self.cfg, "github_update_dismissed_version", "") or "").strip()
+            if dis and compare_semver(APP_VERSION, dis) >= 0:
+                settings_set(self.cfg, "github_update_dismissed_version", "")
+        except Exception:
+            pass
+        threading.Thread(target=self._github_update_check_worker_startup, daemon=True, name="github-update").start()
+
+    def _github_update_check_worker_startup(self) -> None:
+        from github_update_check import fetch_latest_release, is_newer_than_installed
+
+        try:
+            info = fetch_latest_release()
+            if info is None or not is_newer_than_installed(info):
+                return
+            dismissed = str(settings_get(self.cfg, "github_update_dismissed_version", "") or "").strip()
+            if dismissed == info.version:
+                return
+            self.after(0, lambda i=info: self._github_update_prompt_new_version(i, from_startup=True))
+        except Exception:
+            logging.getLogger("rootrecord.github_update").debug("startup update check failed", exc_info=True)
+
+    def _manual_check_for_updates(self) -> None:
+        threading.Thread(target=self._github_update_check_worker_manual, daemon=True, name="github-update-manual").start()
+
+    def _github_update_check_worker_manual(self) -> None:
+        from github_update_check import compare_semver, fetch_latest_release, is_newer_than_installed
+
+        try:
+            info = fetch_latest_release()
+
+            def finish() -> None:
+                try:
+                    if not self.winfo_exists():
+                        return
+                except Exception:
                     return
+                if info is None:
+                    messagebox.showwarning(
+                        "RootRecord Business Manager",
+                        "Could not reach GitHub to check for updates.\n"
+                        "Check your network connection and try again later.",
+                    )
+                    return
+                if is_newer_than_installed(info):
+                    self._github_update_prompt_new_version(info, from_startup=False)
+                elif compare_semver(info.version, APP_VERSION) < 0:
+                    messagebox.showinfo(
+                        "RootRecord Business Manager",
+                        f"This build ({APP_VERSION}) is newer than the latest published GitHub release ({info.version}).",
+                    )
+                else:
+                    messagebox.showinfo(
+                        "RootRecord Business Manager",
+                        f"You are up to date ({APP_VERSION}).",
+                    )
+
+            self.after(0, finish)
+        except Exception:
+            logging.getLogger("rootrecord.github_update").debug("manual update check failed", exc_info=True)
+
+    def _github_update_prompt_new_version(self, info: Any, *, from_startup: bool) -> None:
+        from github_update_check import GithubLatestRelease
+
+        if not isinstance(info, GithubLatestRelease):
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        extra = "" if from_startup else "\n\n(You opened this from About: Check for updates.)"
+        r = messagebox.askyesnocancel(
+            "RootRecord Business Manager",
+            f"A newer release is available: {info.version}\n"
+            f"You are running {APP_VERSION}.\n\n"
+            "Yes: open the installer download in your browser.\n"
+            "No: ask again next time you start the app.\n"
+            "Cancel: stop offering this version until a newer release exists."
+            f"{extra}",
+        )
+        if r is True:
+            url = (info.installer_download_url or "").strip() or info.html_url
+            try:
+                webbrowser.open(url)
+            except Exception:
+                messagebox.showerror("RootRecord Business Manager", f"Could not open:\n{url}")
+        elif r is None:
+            settings_set(self.cfg, "github_update_dismissed_version", info.version)
+
+    def _maybe_show_trial_welcome_popup(self) -> None:
+        """One-time info when opening the app on an active trial (license API + cache)."""
+        try:
+            from license_client import read_cache_file
+            from license_config import get_license_api_config
+
+            if not get_license_api_config():
+                return
+            if settings_get(self.cfg, "trial_welcome_popup_shown", False):
+                return
+            raw = read_cache_file() or {}
+            if str(raw.get("access")) != "full" or str(raw.get("reason")) != "trialing":
+                return
+            messagebox.showinfo(
+                "RootRecord — Free trial",
+                "You're on a free trial of RootRecord Business Manager.\n\n"
+                "Subscribe before your trial ends to keep full access (use Billing in the sidebar).\n\n"
+                "The status bar at the bottom shows your trial time remaining.",
+            )
+            settings_set(self.cfg, "trial_welcome_popup_shown", True)
+        except Exception:
+            pass
+
+    def _refresh_license_banner_text(self) -> None:
+        """Update trial countdown in the footer about once per minute."""
+        try:
+            from license_client import license_footer_hints
+            from license_config import get_license_api_config
+
+            if not get_license_api_config():
+                return
+            h = license_footer_hints(api_configured=True)
+            var = getattr(self, "_license_banner_var", None)
+            if var is not None and h.line and h.tick_trial:
+                var.set(h.line)
+                self._purge_footer_ctk_label_placeholders()
+                self.after(60_000, self._refresh_license_banner_text)
+        except Exception:
+            pass
+
+    def _on_subscribe_billing(self) -> None:
+        """Same as Billing: open the Stripe product / payment link in the browser."""
+        self._on_billing_activate_services()
+
+    def _favicon_candidate_paths(self) -> list[Path]:
+        out: list[Path] = []
+        seen: set[str] = set()
+        for d in iter_app_bundle_asset_dirs():
+            p = d / "favicon.ico"
+            try:
+                key = str(p.resolve())
+            except Exception:
+                key = str(p)
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
+
+    def _apply_app_icon(self) -> None:
+        for ico in self._favicon_candidate_paths():
+            if not ico.is_file():
+                continue
+            p = str(ico.resolve())
+            try:
+                self.iconbitmap(p)
+                return
+            except Exception:
+                pass
+            try:
+                self.iconbitmap(default=p)
+                return
             except Exception:
                 pass
 
     def _apply_window_icon(self, win: Any) -> None:
-        candidates: list[Path] = []
-        if getattr(sys, "frozen", False):
-            candidates.append(Path(sys.executable).resolve().parent / "favicon.ico")
-        candidates.append(Path(__file__).resolve().parent / "favicon.ico")
-        candidates.append(Path(__file__).resolve().parents[2] / "favicon.ico")
-        try:
-            candidates.append(Path(workspace_root()) / "favicon.ico")
-        except Exception:
-            pass
-        for ico in candidates:
+        """Set taskbar/window icon. Toplevels need explicit bitmap= on Windows; default= alone can fail."""
+        for ico in self._favicon_candidate_paths():
+            if not ico.is_file():
+                continue
+            p = str(ico.resolve())
             try:
-                if ico.is_file():
-                    win.iconbitmap(default=str(ico))
-                    return
+                win.iconbitmap(p)
+                return
             except Exception:
                 pass
+            try:
+                win.iconbitmap(default=p)
+                return
+            except Exception:
+                pass
+
+    def _safe_destroy_window(self, win: Any) -> None:
+        """Release modal grab before destroying; omitting this can freeze the app on Windows."""
+        if win is None:
+            return
+        try:
+            if win.winfo_exists():
+                try:
+                    win.grab_release()
+                except Exception:
+                    pass
+                win.destroy()
+        except Exception:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _about_placeholder_pil(self) -> Any:
+        """In-app graphic when no ``about_page_graphic.jpg`` is shipped beside the executable."""
+        from PIL import Image, ImageDraw, ImageFont
+
+        w, h = 420, 420
+        im = Image.new("RGB", (w, h), (26, 30, 36))
+        dr = ImageDraw.Draw(im)
+        dr.rectangle([0, 0, w, 68], fill=(38, 110, 88))
+        font = ImageFont.load_default()
+        dr.text((20, 24), "RootRecord", fill=(235, 240, 245), font=font)
+        dr.text((20, 200), "Add about_page_graphic.jpg next to the app to customize.", fill=(130, 148, 168), font=font)
+        return im
+
+    def _resolve_about_panel_pil(self) -> Any | None:
+        """Load About art: explicit asset names, then splash ``build/branding/Loading.*``, else Pillow placeholder.
+
+        Returns None if Pillow is unavailable or image load fails (caller uses canvas fallback).
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+
+        log = logging.getLogger("rootrecord.ui")
+        path = resolve_shipped_asset(
+            "about_page_graphic.jpg",
+            "about page grahic.jpg",
+            "about page graphic.jpg",
+        )
+        if path is None:
+            try:
+                from branding_theme import first_loading_image_path
+
+                path = first_loading_image_path()
+            except Exception:
+                path = None
+
+        if path is None:
+            for d in iter_app_bundle_asset_dirs():
+                cand = d / "assets" / "about_panel_default.png"
+                if cand.is_file():
+                    path = cand
+                    break
+
+        if path is not None:
+            try:
+                im = Image.open(path)
+                if im.mode == "P" and "transparency" in im.info:
+                    im = im.convert("RGBA")
+                if im.mode in ("RGBA", "LA"):
+                    rgba = im.convert("RGBA")
+                    base = Image.new("RGB", rgba.size, (248, 249, 250))
+                    base.paste(rgba, mask=rgba.split()[3])
+                    im = base
+                else:
+                    im = im.convert("RGB")
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except AttributeError:
+                    resample = Image.LANCZOS  # type: ignore[attr-defined]
+                im.thumbnail((640, 640), resample)
+                return im
+            except Exception:
+                log.exception("Could not read About image: %s", path)
+                return None
+        return self._about_placeholder_pil()
+
+    def _pack_about_side_image_fallback_canvas(self, right: ctk.CTkFrame) -> None:
+        """Branded placeholder without Pillow (frozen builds, or CTkImage failure)."""
+        bg = getattr(self, "_theme_panel", None) or "#2b2b2b"
+        accent = getattr(self, "_theme_accent", "#2B8A8F")
+        fg = getattr(self, "_theme_text_heading", "#DCE4EE")
+        muted = getattr(self, "_theme_text_muted", "#9FA3A9")
+        canvas = tk.Canvas(right, width=420, height=420, highlightthickness=0, bg=bg)
+        canvas.pack(fill="both", expand=True)
+        canvas.create_rectangle(0, 0, 420, 76, fill=accent, outline="")
+        canvas.create_text(20, 38, text="RootRecord", anchor="w", fill=fg, font=("Segoe UI", 18, "bold"))
+        canvas.create_text(
+            20,
+            110,
+            width=380,
+            anchor="nw",
+            fill=muted,
+            font=("Segoe UI", 10),
+            justify="left",
+            text=(
+                "Optional About artwork was not loaded (Pillow missing in this build, or image error).\n\n"
+                "Rebuild with Pillow bundled, or add about_page_graphic.jpg next to the executable, "
+                "or ship build/branding/Loading.png for the installer."
+            ),
+        )
+
+    def _pack_about_side_image(self, right: ctk.CTkFrame) -> None:
+        """Right column graphic on About pages (shipped file, Pillow placeholder, or Tk canvas fallback)."""
+        self._about_image_ctk = None
+        log = logging.getLogger("rootrecord.ui")
+        pil: Any | None = None
+        try:
+            pil = self._resolve_about_panel_pil()
+        except Exception:
+            log.exception("_resolve_about_panel_pil failed")
+        if pil is not None:
+            try:
+                sz = (420, 420)
+                self._about_image_ctk = ctk.CTkImage(light_image=pil, dark_image=pil, size=sz)
+                ctk.CTkLabel(right, text="", image=self._about_image_ctk).pack(fill="both", expand=True)
+                return
+            except Exception:
+                log.exception("About panel CTkImage failed")
+        self._pack_about_side_image_fallback_canvas(right)
+
+    def _popup_field_style_kwargs(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """CTkEntry / CTkComboBox styling for modal dialogs.
+
+        Brand-derived ``_theme_panel`` is often only ~10% lighter than ``_theme_bg``, so CTk
+        entry boxes can look like empty space. Use CustomTkinter's built-in dark palette
+        (same as ``dark-blue`` theme) so fields always contrast with any splash-derived bg.
+        """
+        entry_kw: dict[str, Any] = {
+            "fg_color": "#343638",
+            "text_color": "#DCE4EE",
+            "placeholder_text_color": "#9FA3A9",
+            "border_color": "#565B5E",
+            "border_width": 2,
+            "corner_radius": 6,
+            "height": 34,
+        }
+        combo_kw: dict[str, Any] = {
+            "fg_color": "#343638",
+            "border_color": "#565B5E",
+            "border_width": 2,
+            "corner_radius": 6,
+            "button_color": "#565B5E",
+            "button_hover_color": "#7A848D",
+            "dropdown_fg_color": "#343638",
+            "dropdown_hover_color": "#4A4D50",
+            "dropdown_text_color": "#DCE4EE",
+            "text_color": "#DCE4EE",
+            "height": 34,
+        }
+        return entry_kw, combo_kw
 
     def _attach_tooltip(self, widget: Any, text: str) -> None:
         tip_text = (text or "").strip()
@@ -555,25 +931,27 @@ class RootRecordApp(ctk.CTk):
                     return
                 if getattr(widget, "_rr_tip_win", None) is not None:
                     return
+                # Plain tk only: CTkLabel inside tk.Toplevel often paints an empty white box on Windows.
+                tip_bg = "#2b2f36"
+                tip_fg = "#d7dbe2"
                 tw = tk.Toplevel(self)
                 tw.wm_overrideredirect(True)
+                tw.configure(bg=tip_bg, highlightthickness=0)
                 self._apply_window_icon(tw)
                 x = int(widget.winfo_rootx()) + int(widget.winfo_width()) + 8
                 y = int(widget.winfo_rooty()) + 2
                 tw.geometry(f"+{x}+{y}")
-                lbl = ctk.CTkLabel(
-                    tw,
+                outer = tk.Frame(tw, bg=tip_bg, padx=8, pady=5)
+                outer.pack(fill="both", expand=True)
+                tk.Label(
+                    outer,
                     text=tip_text,
-                    fg_color="#2b2f36",
-                    text_color="#d7dbe2",
-                    corner_radius=8,
-                    padx=8,
-                    pady=5,
+                    bg=tip_bg,
+                    fg=tip_fg,
                     justify="left",
                     wraplength=320,
-                    font=ctk.CTkFont(size=11),
-                )
-                lbl.pack()
+                    font=("Segoe UI", 11),
+                ).pack(anchor="nw")
                 widget._rr_tip_win = tw
             except Exception:
                 pass
@@ -608,8 +986,8 @@ class RootRecordApp(ctk.CTk):
             text="?",
             width=18,
             height=18,
-            fg_color="#5d636d",
-            text_color="#f2f4f7",
+            fg_color=self._theme_help_btn_bg,
+            text_color=self._theme_help_btn_fg,
             corner_radius=9,
             font=ctk.CTkFont(size=11, weight="bold"),
         )
@@ -674,7 +1052,9 @@ class RootRecordApp(ctk.CTk):
             # Fallback: normal minimize when tray support is unavailable.
             return
 
+        meipass = Path(getattr(sys, "_MEIPASS", "") or "")
         icon_candidates = [
+            meipass / "favicon.ico" if meipass else None,
             Path(sys.executable).resolve().parent / "favicon.ico" if getattr(sys, "frozen", False) else None,
             Path(__file__).resolve().parent / "favicon.ico",
             Path(__file__).resolve().parents[2] / "favicon.ico",
@@ -683,7 +1063,16 @@ class RootRecordApp(ctk.CTk):
         if icon_path is None:
             return
         try:
-            img = Image.open(icon_path).convert("RGBA")
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS  # type: ignore[attr-defined]
+            raw = Image.open(icon_path).convert("RGBA")
+            raw.thumbnail((64, 64), resample)
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ox = (64 - raw.width) // 2
+            oy = (64 - raw.height) // 2
+            img.paste(raw, (ox, oy), raw)
         except Exception:
             return
 
@@ -694,17 +1083,53 @@ class RootRecordApp(ctk.CTk):
             self.after(0, self._on_app_close)
 
         menu = pystray.Menu(
-            pystray.MenuItem("Open RootRecord", on_open),
+            pystray.MenuItem("Open RootRecord", on_open, default=True),
             pystray.MenuItem("Exit", on_exit),
         )
-        self._tray_icon = pystray.Icon("rootrecord", img, "RootRecord Business Manager", menu)
+        # Distinct internal name avoids collisions with other tray icons on Windows.
+        self._tray_icon = pystray.Icon(
+            "RootRecordBusinessManagerTray",
+            img,
+            "RootRecord Business Manager",
+            menu,
+        )
         self._tray_icon_running = True
         try:
             self.withdraw()
         except Exception:
             pass
 
-        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        log = logging.getLogger("rootrecord.ui")
+
+        def _run_tray() -> None:
+            try:
+                self._tray_icon.run(setup=lambda icon: setattr(icon, "visible", True))
+            except Exception:
+                log.exception("System tray icon failed")
+                try:
+                    self.after(0, self._tray_run_failed_restore)
+                except Exception:
+                    pass
+
+        # Daemon: must pair with ``_stop_tray_icon`` before exit; avoids exit hangs if ``stop()`` is slow.
+        threading.Thread(target=_run_tray, name="rootrecord-pystray", daemon=True).start()
+
+    def _tray_run_failed_restore(self) -> None:
+        """If the tray loop dies, bring the window back so the app is not headless."""
+        icon = getattr(self, "_tray_icon", None)
+        self._tray_icon = None
+        self._tray_icon_running = False
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+        try:
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+        except Exception:
+            pass
 
     def _restore_from_tray(self) -> None:
         self._stop_tray_icon()
@@ -818,7 +1243,80 @@ class RootRecordApp(ctk.CTk):
         settings_set(self.cfg, "last_backup_utc", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         settings_set(self.cfg, "last_backup_reason", reason)
         self._set_process_status(f"{reason.capitalize()} backup complete.", auto_clear_ms=1800)
+        self._schedule_cloud_copy_upload(out_path)
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(self.cfg, local_user_id=self.uid)
+        except Exception:
+            pass
         return out_path
+
+    def _schedule_cloud_copy_upload(self, sqlite_path: Path) -> None:
+        """Upload newest local backup copy in the background when online backup is enabled."""
+
+        def run() -> None:
+            try:
+                from backup_r2_client import cloud_backup_enabled, upload_sqlite_file
+
+                if not cloud_backup_enabled(self.cfg):
+                    return
+                ok, msg = upload_sqlite_file(self.cfg, sqlite_path, filename=sqlite_path.name)
+                if ok:
+                    self.after(
+                        0,
+                        lambda: self._set_process_status("Online backup copy saved.", auto_clear_ms=2400),
+                    )
+                else:
+                    self.after(
+                        0,
+                        lambda m=msg: self._set_process_status(f"Online backup: {m}", auto_clear_ms=4000),
+                    )
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda: self._set_process_status("Online backup could not finish. Try again later.", auto_clear_ms=4000),
+                )
+
+        threading.Thread(target=run, daemon=True, name="rootrecord-cloud-backup").start()
+
+    def _cloud_backup_tick(self) -> None:
+        """When online, upload newest local backup if it changed since last successful cloud copy (not tied to license sync)."""
+        try:
+
+            def run() -> None:
+                try:
+                    from backup_r2_client import maybe_upload_newest_if_stale
+
+                    ok, msg = maybe_upload_newest_if_stale(self.cfg)
+                    benign = frozenset(
+                        {
+                            "Online backup is off.",
+                            "Already up to date.",
+                            "Online backup is not available on this copy.",
+                            "Save Account Settings with online backup turned on.",
+                        }
+                    )
+                    if ok:
+                        self.after(
+                            0,
+                            lambda: self._set_process_status("Online backup copy updated.", auto_clear_ms=2200),
+                        )
+                    elif msg not in benign:
+                        self.after(
+                            0,
+                            lambda m=msg: self._set_process_status(f"Online backup: {m}", auto_clear_ms=6000),
+                        )
+                except Exception:
+                    pass
+
+            threading.Thread(target=run, daemon=True, name="rootrecord-cloud-backup-tick").start()
+        except Exception:
+            pass
+        try:
+            self.after(300_000, self._cloud_backup_tick)
+        except Exception:
+            pass
 
     def _auto_backup_if_due(self) -> None:
         try:
@@ -860,6 +1358,10 @@ class RootRecordApp(ctk.CTk):
             messagebox.showerror("RootRecord Business Manager", f"Could not open backup folder:\n{exc}")
 
     def _switch_nav(self, tab_name: str) -> None:
+        prev = getattr(self, "_nav_current_tab", None)
+        if prev == "Billing" and tab_name != "Billing":
+            self._cancel_billing_poll()
+        self._nav_current_tab = tab_name
         self.tabview.set(tab_name)
         for name, btn in self._nav_buttons.items():
             if name == tab_name:
@@ -892,6 +1394,16 @@ class RootRecordApp(ctk.CTk):
             self._refresh_account_views()
         elif tab_name == "Program Settings":
             self._refresh_settings_views()
+        elif tab_name == "Billing":
+            try:
+                self._refresh_billing_panel()
+                self._schedule_billing_poll()
+            except Exception:
+                logging.getLogger("rootrecord.ui").exception("Billing panel refresh failed")
+                try:
+                    self._billing_apply_panel_texts_fallback()
+                except Exception:
+                    pass
 
     def _refresh_all_business_scoped_views(self) -> None:
         self._refresh_dashboard()
@@ -1062,7 +1574,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             t,
             text="Money, client records, invoices, and tax estimates in one place.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
 
         nav = ctk.CTkFrame(t, fg_color="transparent")
@@ -1120,7 +1632,7 @@ class RootRecordApp(ctk.CTk):
     def _import_old_database(self) -> None:
         src_raw = filedialog.askopenfilename(
             title="Select old RootRecord database",
-            filetypes=[("SQLite database", "*.db *.sqlite *.sqlite3"), ("All files", "*.*")],
+            filetypes=[("Database files", "*.db *.sqlite *.sqlite3"), ("All files", "*.*")],
         )
         if not src_raw:
             return
@@ -1187,10 +1699,110 @@ class RootRecordApp(ctk.CTk):
         if hasattr(self, "_profile_switch_menu"):
             self._refresh_business_profiles_ui()
         self._refresh_account_local_paths()
+        self._refresh_account_cloud_login()
 
     def _refresh_account_local_paths(self) -> None:
         if getattr(self, "_account_local_db_label", None):
             self._account_local_db_label.configure(text=str(Path(self.cfg.db_path).resolve()))
+        self._refresh_cloud_backup_status_label()
+
+    def _refresh_cloud_backup_status_label(self) -> None:
+        lbl = getattr(self, "_cloud_backup_status_label", None)
+        if lbl is None:
+            return
+        try:
+            from backup_r2_client import cloud_backup_status_summary
+
+            lbl.configure(text=cloud_backup_status_summary(self.cfg))
+        except Exception:
+            lbl.configure(text="")
+
+    def _on_cloud_backup_test_connection(self) -> None:
+        self._set_process_status("Testing online backup service...", auto_clear_ms=None)
+
+        def run() -> None:
+            try:
+                from backup_r2_client import backup_api_base_url, ping_backup_service
+
+                base = backup_api_base_url(self.cfg)
+                if not base:
+                    self.after(
+                        0,
+                        lambda: (
+                            self._set_process_status("Online backup: no service URL.", auto_clear_ms=4000),
+                            messagebox.showwarning(
+                                "RootRecord Business Manager",
+                                "No backup service URL is configured for this copy of the app.",
+                            ),
+                        ),
+                    )
+                    return
+                ok, msg = ping_backup_service(base)
+            except Exception as exc:
+                ok, msg = False, str(exc)[:300]
+
+            def finish() -> None:
+                self._refresh_cloud_backup_status_label()
+                if ok:
+                    self._set_process_status("Online backup service OK.", auto_clear_ms=2400)
+                    messagebox.showinfo("RootRecord Business Manager", "Backup service reachable and R2 is ready.")
+                else:
+                    self._set_process_status(f"Online backup test failed: {msg}", auto_clear_ms=6000)
+                    messagebox.showwarning("RootRecord Business Manager", f"Backup service test failed:\n{msg}")
+
+            self.after(0, finish)
+
+        threading.Thread(target=run, daemon=True, name="rootrecord-cloud-backup-ping").start()
+
+    def _on_cloud_backup_upload_now(self) -> None:
+        self._set_process_status("Uploading latest backup copy...", auto_clear_ms=None)
+
+        def run() -> None:
+            try:
+                from backup_r2_client import cloud_backup_enabled, newest_local_backup_file, upload_sqlite_file
+
+                if not cloud_backup_enabled(self.cfg):
+                    self.after(
+                        0,
+                        lambda: (
+                            self._set_process_status("Turn on online backup first.", auto_clear_ms=4000),
+                            messagebox.showinfo(
+                                "RootRecord Business Manager",
+                                "Turn on 'Also save a secure online copy', then Save Account Settings, then try again.",
+                            ),
+                        ),
+                    )
+                    return
+                p = newest_local_backup_file(self.cfg)
+                if p is None:
+                    self.after(
+                        0,
+                        lambda: (
+                            self._set_process_status("No local backup file to upload.", auto_clear_ms=5000),
+                            messagebox.showinfo(
+                                "RootRecord Business Manager",
+                                "There is no local .sqlite3 backup yet.\n\n"
+                                "Use Program Settings: Backup Now (or enable automatic backups), then try again.",
+                            ),
+                        ),
+                    )
+                    return
+                ok, msg = upload_sqlite_file(self.cfg, p, filename=p.name)
+            except Exception as exc:
+                ok, msg = False, str(exc)[:400]
+
+            def finish() -> None:
+                self._refresh_cloud_backup_status_label()
+                if ok:
+                    self._set_process_status("Online backup copy saved.", auto_clear_ms=4000)
+                    messagebox.showinfo("RootRecord Business Manager", "Latest local backup was uploaded to secure online storage.")
+                else:
+                    self._set_process_status(f"Online backup: {msg}", auto_clear_ms=6000)
+                    messagebox.showwarning("RootRecord Business Manager", msg)
+
+            self.after(0, finish)
+
+        threading.Thread(target=run, daemon=True, name="rootrecord-cloud-backup-manual").start()
 
     def _build_account(self) -> None:
         t = self.tabview.tab("Account Settings")
@@ -1201,10 +1813,54 @@ class RootRecordApp(ctk.CTk):
         )
         ctk.CTkLabel(
             scroll,
-            text="Business profiles, local database path, and invoice/business details.",
-            text_color="gray",
+            text="Online sign-in, business profiles, local database path, and invoice/business details.",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", pady=(0, 8), padx=8)
+
+        self._account_cloud_panel = ctk.CTkFrame(scroll)
+        self._account_cloud_panel.pack(fill="x", padx=8, pady=(0, 12))
+        ctk.CTkLabel(
+            self._account_cloud_panel,
+            text="RootRecord account",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=10, pady=(10, 6))
+        self._account_login_status_label = ctk.CTkLabel(
+            self._account_cloud_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=13),
+        )
+        self._account_login_status_label.pack(anchor="w", padx=10, pady=(0, 2))
+        self._account_login_email_label = ctk.CTkLabel(
+            self._account_cloud_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=12),
+        )
+        self._account_login_email_label.pack(anchor="w", padx=10, pady=(0, 2))
+        self._account_login_detail_label = ctk.CTkLabel(
+            self._account_cloud_panel,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=12),
+            wraplength=520,
+        )
+        self._account_login_detail_label.pack(anchor="w", padx=10, pady=(0, 6))
+        _cloud_btn_row = ctk.CTkFrame(self._account_cloud_panel, fg_color="transparent")
+        _cloud_btn_row.pack(anchor="w", padx=10, pady=(0, 10))
+        self._account_logout_btn = ctk.CTkButton(
+            _cloud_btn_row,
+            text="Log out",
+            width=120,
+            command=self._on_cloud_logout,
+        )
+        self._account_logout_btn.pack(side="left")
 
         content = ctk.CTkFrame(scroll, fg_color="transparent")
         content.pack(fill="x", expand=True, padx=8, pady=(2, 0))
@@ -1235,7 +1891,7 @@ class RootRecordApp(ctk.CTk):
         self._account_profile_hint = ctk.CTkLabel(
             prof_row,
             text="Add a profile, or remove the one selected in the sidebar",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
         )
         self._account_profile_hint.pack(anchor="w", pady=(0, 4))
@@ -1254,7 +1910,7 @@ class RootRecordApp(ctk.CTk):
         self._account_local_db_label = ctk.CTkLabel(
             left_col,
             text=str(Path(self.cfg.db_path).resolve()),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(family="Consolas", size=11),
             justify="left",
             wraplength=430,
@@ -1264,6 +1920,86 @@ class RootRecordApp(ctk.CTk):
         db_row.pack(anchor="w", pady=(0, 8))
         ctk.CTkButton(db_row, text="Open database folder", width=170, command=self._open_database_folder).pack(side="left", padx=(0, 8))
         ctk.CTkButton(db_row, text="Import old database", width=170, command=self._import_old_database).pack(side="left")
+
+        ctk.CTkLabel(left_col, text="Sync with cloud", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            anchor="w", pady=(16, 4)
+        )
+        ctk.CTkLabel(
+            left_col,
+            text=(
+                "When you are signed in, RootRecord sends pending updates to your account and pulls in anything "
+                "new from your other devices (work session activity is shared this way). "
+                "After you add or change data, a background sync runs automatically about once a minute while "
+                "you are online—use the button to run it right away. "
+                "A full snapshot of your database file is separate: turn on Online backup below if you want that "
+                "after each local backup."
+            ),
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=11),
+            wraplength=430,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        sync_btn_row = ctk.CTkFrame(left_col, fg_color="transparent")
+        sync_btn_row.pack(anchor="w", pady=(0, 8))
+        ctk.CTkButton(
+            sync_btn_row,
+            text="Sync with Cloud",
+            width=200,
+            command=self._on_account_sync_with_cloud,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(left_col, text="Online backup copy", font=ctk.CTkFont(size=16, weight="bold")).pack(
+            anchor="w", pady=(16, 4)
+        )
+        ctk.CTkLabel(
+            left_col,
+            text=(
+                "Optional: after each local backup, RootRecord can also save a protected full-database copy to "
+                "secure online storage. Separate from sync above. If you are offline, it tries again later."
+            ),
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=11),
+            wraplength=430,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        self._set_cloud_backup = ctk.CTkSwitch(
+            left_col,
+            text="Also save a secure online copy after each local backup",
+        )
+        if settings_get(self.cfg, "cloud_backup_enabled", False):
+            self._set_cloud_backup.select()
+        self._set_cloud_backup.pack(anchor="w", pady=(0, 8))
+        try:
+            from backup_r2_client import bootstrap_cloud_backup_if_enabled
+
+            bootstrap_cloud_backup_if_enabled(self.cfg)
+        except Exception:
+            pass
+        self._cloud_backup_status_label = ctk.CTkLabel(
+            left_col,
+            text="",
+            anchor="w",
+            justify="left",
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=11),
+            wraplength=430,
+        )
+        self._cloud_backup_status_label.pack(anchor="w", pady=(0, 6))
+        cloud_btns = ctk.CTkFrame(left_col, fg_color="transparent")
+        cloud_btns.pack(anchor="w", pady=(0, 8))
+        ctk.CTkButton(
+            cloud_btns,
+            text="Test connection",
+            width=130,
+            command=self._on_cloud_backup_test_connection,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            cloud_btns,
+            text="Upload latest backup now",
+            width=180,
+            command=self._on_cloud_backup_upload_now,
+        ).pack(side="left", padx=(0, 8))
+        self._refresh_cloud_backup_status_label()
 
         ctk.CTkLabel(right_col, text="Business details", font=ctk.CTkFont(size=16, weight="bold")).pack(
             anchor="w", pady=(0, 8)
@@ -1292,8 +2028,8 @@ class RootRecordApp(ctk.CTk):
                 text="?",
                 width=18,
                 height=18,
-                fg_color="#5d636d",
-                text_color="#f2f4f7",
+fg_color=self._theme_help_btn_bg,
+                    text_color=self._theme_help_btn_fg,
                 corner_radius=9,
                 font=ctk.CTkFont(size=11, weight="bold"),
             )
@@ -1311,12 +2047,213 @@ class RootRecordApp(ctk.CTk):
             anchor="w", pady=(12, 8)
         )
         self._refresh_account_local_paths()
+        self._account_me_fetch_gen = 0
+        self._refresh_account_cloud_login()
+
+    def _apply_account_me_fetch(self, gen: int, payload: tuple[str, object]) -> None:
+        if gen != getattr(self, "_account_me_fetch_gen", 0):
+            return
+        if not getattr(self, "_account_login_detail_label", None):
+            return
+        kind, data = payload
+        if kind == "ok":
+            from license_client import CloudAccountInfo
+
+            if not isinstance(data, CloudAccountInfo):
+                return
+            info = data
+            lines = [f"Subscription: {info.subscription_status or '—'}"]
+            if info.trial_ends_at:
+                lines.append(f"Trial ends: {info.trial_ends_at}")
+            if info.account_id:
+                short_id = info.account_id[:8] + "…" if len(info.account_id) > 12 else info.account_id
+                lines.append(f"Account ID: {short_id}")
+            self._account_login_detail_label.configure(text="\n".join(lines))
+        else:
+            err = str(data)
+            self._account_login_detail_label.configure(text=f"Could not load account details: {err[:200]}")
+
+    def _refresh_account_cloud_login(self) -> None:
+        if not getattr(self, "_account_login_status_label", None):
+            return
+        self._account_me_fetch_gen = getattr(self, "_account_me_fetch_gen", 0) + 1
+        gen = self._account_me_fetch_gen
+
+        from license_client import LICENSE_SESSION_TOKEN_KEY, read_cache_file
+        from license_config import get_license_api_config
+
+        lic = get_license_api_config()
+        if not lic:
+            self._account_login_status_label.configure(text="Online sign-in is not configured.")
+            self._account_login_email_label.configure(
+                text="This copy of the app is not set up for online accounts. Contact support if you expected sign-in."
+            )
+            self._account_login_detail_label.configure(text="")
+            self._account_logout_btn.configure(state="disabled")
+            return
+
+        tok = (settings_get(self.cfg, LICENSE_SESSION_TOKEN_KEY, "") or "").strip()
+        email = (settings_get(self.cfg, "license_account_email", "") or "").strip()
+        if not email:
+            email = (os.environ.get("LICENSE_EMAIL") or "").strip()
+
+        if tok:
+            self._account_login_status_label.configure(text="Signed in")
+            self._account_logout_btn.configure(state="normal")
+            self._account_login_email_label.configure(text=f"Email: {email or '—'}")
+            self._account_login_detail_label.configure(text="Loading account details…")
+
+            def bg() -> None:
+                try:
+                    from license_client import fetch_cloud_account_me
+
+                    info = fetch_cloud_account_me(tok, cfg=lic)
+                    self.after(0, lambda: self._apply_account_me_fetch(gen, ("ok", info)))
+                except Exception as exc:
+                    self.after(0, lambda e=exc: self._apply_account_me_fetch(gen, ("err", e)))
+
+            threading.Thread(target=bg, daemon=True).start()
+        else:
+            self._account_login_status_label.configure(text="Not signed in")
+            self._account_logout_btn.configure(state="disabled")
+            self._account_login_email_label.configure(text=f"Billing email on file: {email or '—'}")
+            raw = read_cache_file()
+            sub = raw.get("subscription_status") if isinstance(raw, dict) else None
+            access = raw.get("access") if isinstance(raw, dict) else None
+            extra = ""
+            if sub or access:
+                extra = f"Last known access: {access or '—'}" + (f" · {sub}" if sub else "")
+            self._account_login_detail_label.configure(text=extra or "Sign in at next startup, or use Billing if prompted.")
+        self._sync_cloud_backup_toggle_from_settings()
+
+    def _sync_cloud_backup_toggle_from_settings(self) -> None:
+        sw = getattr(self, "_set_cloud_backup", None)
+        if sw is None:
+            return
+        if bool(settings_get(self.cfg, "cloud_backup_enabled", False)):
+            sw.select()
+        else:
+            sw.deselect()
+
+    def _on_account_sync_with_cloud(self) -> None:
+        """Push sync outbox and pull remote events (requires sign-in). Runs off the UI thread."""
+        try:
+            import license_gate as _lg
+
+            if _lg.is_read_only():
+                messagebox.showinfo(
+                    "RootRecord Business Manager",
+                    "The app is in read-only mode. Subscribe or finish sign-in, then try again.",
+                )
+                return
+        except Exception:
+            pass
+
+        from license_client import LICENSE_SESSION_TOKEN_KEY
+        from license_config import get_license_api_config
+
+        if not get_license_api_config():
+            messagebox.showinfo(
+                "RootRecord Business Manager",
+                "Online sign-in is not available on this copy of the app.",
+            )
+            return
+        tok = (settings_get(self.cfg, LICENSE_SESSION_TOKEN_KEY, "") or "").strip()
+        if not tok:
+            messagebox.showinfo(
+                "RootRecord Business Manager",
+                "Sign in to your RootRecord account first (restart the app or complete sign-in when prompted).",
+            )
+            return
+
+        self._set_process_status("Syncing with cloud…", auto_clear_ms=None)
+
+        def run() -> None:
+            try:
+                from sync_engine import sync_cycle_best_effort
+
+                pushed, pulled, applied = sync_cycle_best_effort(self.cfg, local_user_id=self.uid)
+            except Exception as exc:
+                err = str(exc)[:400]
+                self.after(
+                    0,
+                    lambda: self._set_process_status(
+                        "Sync could not finish. Check your connection and try again.",
+                        auto_clear_ms=5000,
+                    ),
+                )
+                self.after(0, lambda e=err: messagebox.showerror("RootRecord Business Manager", e))
+                return
+
+            def done() -> None:
+                parts: list[str] = []
+                if pushed:
+                    parts.append(f"sent {pushed} update(s)")
+                if pulled:
+                    parts.append(f"received {pulled} from cloud")
+                if applied:
+                    parts.append(f"merged {applied} new item(s) here")
+                if not parts:
+                    msg = "Already up to date with the cloud."
+                else:
+                    msg = "Sync complete: " + ", ".join(parts) + "."
+                self._set_process_status(msg, auto_clear_ms=4500)
+                if applied:
+                    try:
+                        self._refresh_dashboard()
+                    except Exception:
+                        pass
+
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True, name="rootrecord-sync-with-cloud").start()
+
+    def _on_cloud_logout(self) -> None:
+        from license_client import LICENSE_SESSION_TOKEN_KEY
+        from license_config import get_license_api_config
+
+        if not get_license_api_config():
+            return
+        tok = (settings_get(self.cfg, LICENSE_SESSION_TOKEN_KEY, "") or "").strip()
+        if not tok:
+            messagebox.showinfo("RootRecord", "You are not signed in.")
+            return
+        if not messagebox.askyesno(
+            "Log out",
+            "Sign out of your RootRecord account on this computer?\n\n"
+            "The application will close. The next time you start RootRecord, you will be asked to sign in again.",
+        ):
+            return
+        try:
+            from license_runtime import logout_cloud_session
+
+            logout_cloud_session(self.cfg)
+        except Exception as exc:
+            messagebox.showerror("RootRecord", str(exc))
+            return
+        try:
+            self._cancel_billing_poll()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            raise SystemExit(0) from None
 
     def _save_account_settings(self) -> None:
         self._set_process_status("Saving account settings...", auto_clear_ms=None)
         for key, var in self._biz_vars.items():
             settings_set(self.cfg, key, var.get().strip())
         settings_set(self.cfg, "business_invoice_notes", self._biz_notes.get("0.0", "end").strip())
+        if getattr(self, "_set_cloud_backup", None) is not None:
+            settings_set(self.cfg, "cloud_backup_enabled", self._set_cloud_backup.get() == 1)
+            if self._set_cloud_backup.get() == 1:
+                try:
+                    from backup_r2_client import ensure_vault_token
+
+                    ensure_vault_token(self.cfg)
+                except Exception:
+                    pass
         active_id = get_active_business_id(self.cfg)
         if active_id > 0:
             bn = str(self._biz_vars.get("business_name").get() if self._biz_vars.get("business_name") else "").strip()
@@ -1326,8 +2263,46 @@ class RootRecordApp(ctk.CTk):
                 except Exception:
                     pass
         self._refresh_business_profiles_ui()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(self.cfg, local_user_id=self.uid)
+        except Exception:
+            pass
         self._set_process_status("Account settings saved.", auto_clear_ms=1800)
         messagebox.showinfo("RootRecord Business Manager", "Account settings saved.")
+        self._refresh_cloud_backup_status_label()
+        if getattr(self, "_set_cloud_backup", None) is not None and self._set_cloud_backup.get() == 1:
+
+            def try_cloud_after_save() -> None:
+                try:
+                    from backup_r2_client import maybe_upload_newest_if_stale, newest_local_backup_file
+
+                    if newest_local_backup_file(self.cfg) is None:
+                        self.after(
+                            0,
+                            lambda: self._set_process_status(
+                                "Online backup on: run a local backup (Program Settings) to upload a copy.",
+                                auto_clear_ms=7000,
+                            ),
+                        )
+                        return
+                    ok, msg = maybe_upload_newest_if_stale(self.cfg)
+                    if ok:
+                        self.after(
+                            0,
+                            lambda: self._set_process_status("Online backup copy saved.", auto_clear_ms=4000),
+                        )
+                    elif msg not in frozenset({"Already up to date."}):
+                        self.after(
+                            0,
+                            lambda m=msg: self._set_process_status(f"Online backup: {m}", auto_clear_ms=6000),
+                        )
+                    self.after(0, self._refresh_cloud_backup_status_label)
+                except Exception:
+                    pass
+
+            threading.Thread(target=try_cloud_after_save, daemon=True, name="rootrecord-cloud-backup-after-save").start()
 
     def _on_toggle_multi_business(self) -> None:
         enabled = bool(self._multi_business_enabled_var.get())
@@ -1454,12 +2429,18 @@ class RootRecordApp(ctk.CTk):
             except Exception:
                 pass
             return
-        top = ctk.CTkToplevel(self)
+        m = self._tk_modal_theme()
+        top = tk.Toplevel(self)
         top.title("Check-in")
+        top.configure(bg=m["root_bg"])
         self._apply_window_icon(top)
-        top.geometry("640x360")
-        top.minsize(620, 340)
         top.transient(self)
+        try:
+            top.withdraw()
+        except Exception:
+            pass
+        # One character width for Entry + Combobox so rows align; avoid expand=True on combobox (full-window stretch).
+        field_ch = 50
         if bool(settings_get(self.cfg, "prompt_popup_topmost", False)):
             try:
                 top.attributes("-topmost", True)
@@ -1471,44 +2452,84 @@ class RootRecordApp(ctk.CTk):
                 pass
         self._active_prompt_popup = top
         top.bind("<Destroy>", lambda _e: setattr(self, "_active_prompt_popup", None))
-        top.grab_set()
-        ctk.CTkLabel(top, text="What are you doing right now?", font=ctk.CTkFont(size=15)).pack(pady=12)
-        ent = ctk.CTkEntry(top, width=400, placeholder_text="Short label for your current task…")
-        ent.pack(pady=8)
+        body = tk.Frame(top, bg=m["panel_bg"])
+        body.pack(fill="both", expand=False)
+        cb_style = self._tk_modal_configure_combobox_style(top, "RRCheckIn.TCombobox", m)
+        e_kw: dict[str, Any] = {
+            "bg": m["ent_bg"],
+            "fg": m["lbl_fg"],
+            "insertbackground": m["lbl_fg"],
+            "relief": "flat",
+            "font": m["font_entry"],
+            "width": field_ch,
+            "highlightthickness": 1,
+            "highlightbackground": m["ent_hl"],
+            "highlightcolor": m["ent_hl"],
+        }
+        tk.Label(
+            body,
+            text="What are you doing right now?",
+            bg=m["panel_bg"],
+            fg=m["lbl_fg"],
+            font=m["font_title"],
+        ).pack(anchor="w", padx=24, pady=(18, 8))
+        ent = tk.Entry(body, **e_kw)
+        ent.pack(anchor="w", padx=24, pady=(0, 8), ipady=5)
         cats = list_work_categories(self.cfg, self.uid)
         self._popup_cat_map: dict[str, int | None] = {}
         for c in cats:
             self._popup_cat_map[c["name"]] = int(c["id"])
         cat_keys = list(self._popup_cat_map.keys())
-        cat_row = ctk.CTkFrame(top, fg_color="transparent")
-        cat_row.pack(fill="x", padx=24, pady=(2, 4))
-        ctk.CTkLabel(cat_row, text="Category").pack(side="left")
-        cmb_cat = ctk.CTkComboBox(cat_row, values=cat_keys or ["—"], width=200)
+        cat_row = tk.Frame(body, bg=m["panel_bg"])
+        cat_row.pack(fill="x", padx=24, pady=(6, 4))
+        tk.Label(cat_row, text="Category", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(side="left")
+        cmb_cat = ttk.Combobox(cat_row, values=cat_keys or ["—"], width=field_ch, state="readonly", style=cb_style)
         cmb_cat.set(_default_activity_category_label(cat_keys) if cat_keys else "—")
-        cmb_cat.pack(side="left", padx=8)
-        ctk.CTkButton(
+        cmb_cat.pack(side="left", padx=(10, 8))
+        tk.Button(
             cat_row,
             text="Add",
-            width=52,
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#f0f0f0",
+            activebackground=m["accent"],
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=14,
+            pady=6,
             command=lambda: self._quick_add_category_from_popup(cmb_cat),
         ).pack(side="left")
-        other_popup_cat = ctk.CTkEntry(top, width=180, placeholder_text="Other category")
-        other_popup_cat.pack(anchor="w", padx=24, pady=(0, 4))
+        tk.Label(
+            body,
+            text="Other category (optional — overrides dropdown if set)",
+            bg=m["panel_bg"],
+            fg=m["lbl_fg"],
+            font=m["font_hint"],
+        ).pack(anchor="w", padx=24, pady=(4, 4))
+        other_popup_cat = tk.Entry(body, **e_kw)
+        other_popup_cat.pack(anchor="w", padx=24, pady=(0, 6), ipady=5)
 
         prows = list_projects(self.cfg, self.uid)
         self._popup_proj_map: dict[str, int | None] = {"—": None}
         for p in prows:
             self._popup_proj_map[p["name"]] = int(p["id"])
-        proj_row = ctk.CTkFrame(top, fg_color="transparent")
-        proj_row.pack(fill="x", padx=24, pady=(0, 6))
-        ctk.CTkLabel(proj_row, text="Project").pack(side="left")
-        cmb_proj = ctk.CTkComboBox(proj_row, values=list(self._popup_proj_map.keys()), width=160)
+        proj_row = tk.Frame(body, bg=m["panel_bg"])
+        proj_row.pack(fill="x", padx=24, pady=(4, 8))
+        tk.Label(proj_row, text="Project", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(side="left")
+        cmb_proj = ttk.Combobox(proj_row, values=list(self._popup_proj_map.keys()), width=field_ch, state="readonly", style=cb_style)
         cmb_proj.set("—")
-        cmb_proj.pack(side="left", padx=14)
-        ctk.CTkButton(
+        cmb_proj.pack(side="left", padx=(10, 8))
+        tk.Button(
             proj_row,
             text="Add",
-            width=52,
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#f0f0f0",
+            activebackground=m["accent"],
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=14,
+            pady=6,
             command=lambda: self._quick_add_project_from_popup(cmb_proj),
         ).pack(side="left")
 
@@ -1524,7 +2545,7 @@ class RootRecordApp(ctk.CTk):
             seed_desc = saved_desc
         if seed_desc:
             ent.insert(0, seed_desc)
-            ent.icursor("end")
+            ent.icursor(tk.END)
         saved_cat = str(settings_get(self.cfg, "last_popup_category_name", "") or "").strip()
         if saved_cat and saved_cat in self._popup_cat_map:
             cmb_cat.set(saved_cat)
@@ -1561,25 +2582,47 @@ class RootRecordApp(ctk.CTk):
                 settings_set(self.cfg, "last_popup_desc", t)
                 settings_set(self.cfg, "last_popup_category_name", oc if oc else cmb_cat.get().strip())
                 settings_set(self.cfg, "last_popup_project_name", cmb_proj.get().strip())
-            top.destroy()
+            self._safe_destroy_window(top)
 
-        ctk.CTkLabel(
-            top,
+        def close_checkin() -> None:
+            self._safe_destroy_window(top)
+
+        tk.Label(
+            body,
             text="Press Enter or click Submit",
-            text_color="gray",
-            font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=24, pady=(2, 4))
-        action_row = ctk.CTkFrame(top, fg_color="transparent")
-        action_row.pack(fill="x", padx=24, pady=(4, 10))
-        ctk.CTkButton(action_row, text="Submit", width=120, command=submit).pack(side="left")
-        ctk.CTkButton(
+            bg=m["panel_bg"],
+            fg="#9eb0c4",
+            font=m["font_hint"],
+        ).pack(anchor="w", padx=24, pady=(8, 8))
+        action_row = tk.Frame(body, bg=m["panel_bg"])
+        action_row.pack(fill="x", padx=24, pady=(8, 18))
+        tk.Button(
+            action_row,
+            text="Submit",
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#f8f8f8",
+            activebackground=m["accent"],
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=submit,
+        ).pack(side="left")
+        tk.Button(
             action_row,
             text="Cancel",
-            width=120,
-            fg_color=("gray75", "gray28"),
-            command=top.destroy,
-        ).pack(side="left", padx=8)
+            font=m["font_btn"],
+            bg="#4a4a4a",
+            fg="#f0f0f0",
+            activebackground="#3d3d3d",
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=close_checkin,
+        ).pack(side="left", padx=12)
         ent.bind("<Return>", lambda _e: submit())
+        top.protocol("WM_DELETE_WINDOW", close_checkin)
         timeout_sec = int(settings_get(self.cfg, "prompt_no_response_timeout_sec", 45))
         action = settings_get(self.cfg, "prompt_no_response_action", "none")
         if action == "copy_last":
@@ -1588,13 +2631,37 @@ class RootRecordApp(ctk.CTk):
                     return
                 last = getattr(self, "_last_activity_desc", "") or "Working"
                 self._log_from_values(last, None, None, None, None)
-                top.destroy()
+                self._safe_destroy_window(top)
             top.after(max(5, timeout_sec) * 1000, on_timeout)
+        try:
+            top.update_idletasks()
+            win_w = max(560, min(960, top.winfo_reqwidth()))
+            win_h = max(340, min(780, top.winfo_reqheight()))
+            top.geometry(f"{win_w}x{win_h}")
+            top.minsize(520, 320)
+            top.deiconify()
+            top.update()
+        except Exception:
+            pass
+        self._apply_window_icon(top)
+        try:
+            top.after(150, lambda w=top: self._apply_window_icon(w))
+        except Exception:
+            pass
+        try:
+            top.lift()
+            top.focus_force()
+        except Exception:
+            pass
+        try:
+            top.grab_set()
+        except Exception:
+            pass
 
     def _dash_chart_colors(self) -> tuple[str, str]:
         if ctk.get_appearance_mode() == "Light":
             return "#e9eef5", "#1a2230"
-        return "#0d1723", "#d9e5f4"
+        return self._theme_chart_bg, self._theme_chart_fg
 
     def _dash_style_axes(self, fig, ax) -> None:
         bg, fg = self._dash_chart_colors()
@@ -1602,7 +2669,7 @@ class RootRecordApp(ctk.CTk):
         ax.set_facecolor(bg)
         ax.tick_params(colors=fg, labelsize=8)
         ax.title.set_color(fg)
-        edge = "#6f8198" if ctk.get_appearance_mode() == "Light" else "#2f445b"
+        edge = "#6f8198" if ctk.get_appearance_mode() == "Light" else self._theme_chart_edge
         for spine in ax.spines.values():
             spine.set_color(edge)
         ax.yaxis.label.set_color(fg)
@@ -1683,7 +2750,7 @@ class RootRecordApp(ctk.CTk):
         ]
         self._dash_pie_total_sec = total_sec
         ax = self._dash_ax_pie
-        subtle = "#6b7a8f" if ctk.get_appearance_mode() == "Light" else "#8fa4bd"
+        subtle = "#6b7a8f" if ctk.get_appearance_mode() == "Light" else self._theme_text_muted
         self._dash_pie_hover_strip = ax.text(
             0.5,
             -0.06,
@@ -1854,7 +2921,15 @@ class RootRecordApp(ctk.CTk):
             show_m = settings_get(self.cfg, "show_money_in_dashboard", True)
             pbreak = daily_project_breakdown(self.cfg, self.uid, ds, de)
             top_project = pbreak[0] if pbreak else None
-            self._refresh_dashboard_current_status()
+            try:
+                self._refresh_dashboard_current_status()
+            except Exception:
+                logging.getLogger("rootrecord.ui").exception("Dashboard status line failed")
+                try:
+                    if getattr(self, "_dash_status_lbl", None):
+                        self._dash_status_lbl.configure(text="Current Status: (unavailable)")
+                except Exception:
+                    pass
             self._refresh_dashboard_action_buttons()
             line1 = (
                 f"{label} unique time (excluding breaks): {_fmt_hm(sec)}"
@@ -1864,7 +2939,7 @@ class RootRecordApp(ctk.CTk):
             line2 = "Top project: —"
             if top_project:
                 line2 = (
-                    f"Top project: {str(top_project.get('project_name'))[:24]} "
+                    f"Top project: {str(top_project.get('project_name'))[:36]} "
                     f"({_fmt_hm(float(top_project.get('seconds_total') or 0))})"
                 )
             line3 = "Income: —  ·  Expenses: —"
@@ -1875,10 +2950,20 @@ class RootRecordApp(ctk.CTk):
                 af_parts: list[str] = []
                 for cur_code in sorted(af_map.keys()):
                     agg = af_map.get(cur_code, {})
-                    af_parts.append(
-                        f"{cur_code} {_fmt_money(int(agg.get('available_cents') or 0), cur_code)}"
-                    )
+                    # _fmt_money already prefixes the currency code — do not duplicate (e.g. "USD USD").
+                    af_parts.append(_fmt_money(int(agg.get("available_cents") or 0), cur_code))
+                ledger_fallback = False
+                if not af_parts:
+                    # No bank/cash accounts: show cumulative ledger net (income − expenses) so
+                    # recorded income is visible here until the user adds manual accounts.
+                    led_map = ledger_net_totals_by_currency(self.cfg, self.uid)
+                    for cur_code in sorted(led_map.keys()):
+                        net = int(led_map[cur_code].get("net_cents") or 0)
+                        af_parts.append(_fmt_money(net, cur_code))
+                    ledger_fallback = bool(af_parts)
                 af_text = "  ·  ".join(af_parts) if af_parts else "—"
+                if ledger_fallback:
+                    af_text = f"{af_text}  ·  (ledger total — add Available funds accounts to track real balances)"
                 line3 = (
                     f"Income: {_fmt_money(int(tm), default_cur)} ({_pct_change_text(float(tm), prev_tm)} vs {prev_label})"
                     f"  ·  Expenses: {_fmt_money(int(ex), default_cur)} ({_pct_change_text(float(ex), prev_ex)} vs {prev_label})"
@@ -1897,7 +2982,15 @@ class RootRecordApp(ctk.CTk):
             if not _DASHBOARD_CHARTS_AVAILABLE or not getattr(self, "_dash_ax_pie", None):
                 return
             _, fg = self._dash_chart_colors()
-            colors = ("#1f6aa5", "#2fa572", "#e67700", "#7950f2", "#868e96", "#c92a2a", "#5c4d7d")
+            colors = (
+                self._theme_accent,
+                "#2fa572",
+                "#e67700",
+                "#7950f2",
+                "#868e96",
+                "#c92a2a",
+                "#5c4d7d",
+            )
             cat_color_map: dict[str, str] = {}
             for c in list_work_categories(self.cfg, self.uid):
                 nm = str(c.get("name") or "").strip()
@@ -1922,6 +3015,7 @@ class RootRecordApp(ctk.CTk):
                 )
                 self._dash_ax_pie.set_xticks([])
                 self._dash_ax_pie.set_yticks([])
+                self._dash_fig_pie.subplots_adjust(left=0.10, right=0.90, top=0.88, bottom=0.12)
             else:
                 sizes = [float(b["seconds_total"]) for b in parts]
                 wedge_edge = "#1a1a1a" if ctk.get_appearance_mode() != "Light" else "#cccccc"
@@ -1952,7 +3046,7 @@ class RootRecordApp(ctk.CTk):
                 self._dash_ax_pie.set_xlim(-1.75, 1.75)
                 self._dash_ax_pie.set_ylim(-1.75, 1.75)
                 self._dash_pie_setup_hover(wedges, parts, total_sec, fg)
-                self._dash_fig_pie.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.14)
+                self._dash_fig_pie.subplots_adjust(left=0.10, right=0.90, top=0.88, bottom=0.12)
             self._dash_ax_pie.set_title(f"{label} by category", fontsize=11, pad=10)
             self._dash_canvas_pie.draw()
 
@@ -2042,7 +3136,7 @@ class RootRecordApp(ctk.CTk):
             ordered_cats = [nm for nm, _h in sorted(totals_by_cat.items(), key=lambda kv: kv[1], reverse=True)]
             if ordered_cats:
                 bucket_raw_totals = [sum(bucket.values()) for bucket in bucket_category_hours]
-                bottoms = [0.0 for _ in xpos]
+                cat_bar_vals: dict[str, list[float]] = {}
                 for i, nm in enumerate(ordered_cats):
                     vals: list[float] = []
                     for bi, bucket in enumerate(bucket_category_hours):
@@ -2053,30 +3147,57 @@ class RootRecordApp(ctk.CTk):
                             vals.append(raw_v * (hrs[bi] / raw_total))
                         else:
                             vals.append(0.0)
-                    if sum(vals) <= 0:
+                    if sum(vals) > 0:
+                        cat_bar_vals[nm] = vals
+                bottoms = [0.0 for _ in xpos]
+                for i, nm in enumerate(ordered_cats):
+                    if nm not in cat_bar_vals:
                         continue
+                    vals = cat_bar_vals[nm]
                     col = cat_color_map.get(nm, colors[i % len(colors)])
                     self._dash_ax_bar.bar(xpos, vals, bottom=bottoms, color=col, edgecolor="#000000", linewidth=0.35)
-                    for j, v in enumerate(vals):
-                        total = hrs[j] if j < len(hrs) else 0.0
-                        if total <= 0 or v <= 0:
-                            continue
-                        pct = (v / total) * 100.0
-                        # Keep labels inside larger visible segments only.
-                        if v < 0.45 or pct < 8:
-                            continue
-                        self._dash_ax_bar.text(
-                            xpos[j],
-                            bottoms[j] + (v / 2.0),
-                            f"{pct:.0f}%\n{v:.1f}h",
-                            ha="center",
-                            va="center",
-                            fontsize=7,
-                            color="#ffffff",
-                        )
-                    bottoms = [bottoms[j] + vals[j] for j in range(len(vals))]
+                    bottoms = [bottoms[j] + vals[j] for j in range(len(bottoms))]
+                # One label per day column (largest segment only) — avoids stacked-label overlap.
+                cat_list = [nm for nm in ordered_cats if nm in cat_bar_vals]
+                for j in range(len(xpos)):
+                    total = hrs[j] if j < len(hrs) else 0.0
+                    if total <= 0:
+                        continue
+                    best_nm: str | None = None
+                    best_v = 0.0
+                    for nm in cat_list:
+                        v = cat_bar_vals[nm][j]
+                        if v > best_v:
+                            best_v = v
+                            best_nm = nm
+                    if best_nm is None or best_v <= 0:
+                        continue
+                    pct = (best_v / total) * 100.0
+                    if best_v < 0.42 or pct < 15:
+                        continue
+                    btm = 0.0
+                    for nm in cat_list:
+                        if nm == best_nm:
+                            break
+                        btm += cat_bar_vals[nm][j]
+                    yc = btm + best_v / 2.0
+                    self._dash_ax_bar.text(
+                        xpos[j],
+                        yc,
+                        f"{pct:.0f}%\n{best_v:.1f}h",
+                        ha="center",
+                        va="center",
+                        fontsize=6,
+                        color="#ffffff",
+                    )
             else:
-                self._dash_ax_bar.bar(xpos, hrs, color="#1f6aa5", edgecolor="#1f6aa5", linewidth=0.0)
+                self._dash_ax_bar.bar(
+                    xpos,
+                    hrs,
+                    color=self._theme_accent,
+                    edgecolor=self._theme_accent,
+                    linewidth=0.0,
+                )
             self._dash_ax_bar.set_xticks(xpos)
             self._dash_ax_bar.set_xticklabels(xlabs, fontsize=8)
             self._dash_ax_bar.set_ylabel("Hours")
@@ -2105,6 +3226,7 @@ class RootRecordApp(ctk.CTk):
                     self._dash_ax_money.set_title("Money", fontsize=11, pad=8)
                     mx = max(inc_w, exp_w, 1.0)
                     self._dash_ax_money.set_xlim(0, mx * 1.2)
+                    self._dash_fig_money.subplots_adjust(left=0.14, right=0.96, top=0.88, bottom=0.28)
                 else:
                     self._dash_ax_money.text(
                         0.5,
@@ -2119,9 +3241,15 @@ class RootRecordApp(ctk.CTk):
                     self._dash_ax_money.set_xticks([])
                     self._dash_ax_money.set_yticks([])
                     self._dash_ax_money.set_title("Money", fontsize=11, pad=8)
+                    self._dash_fig_money.subplots_adjust(left=0.12, right=0.96, top=0.88, bottom=0.30)
                 self._dash_canvas_money.draw()
         except Exception as exc:  # noqa: BLE001
             self._dash_stats.configure(text=f"(Could not refresh dashboard: {exc})")
+            try:
+                if getattr(self, "_dash_status_lbl", None):
+                    self._dash_status_lbl.configure(text="Current Status: (unavailable)")
+            except Exception:
+                pass
 
     def _schedule_dashboard_clock_live_refresh(self) -> None:
         """While clocked in, refresh dashboard stats periodically so 'today' time updates on screen."""
@@ -2142,28 +3270,33 @@ class RootRecordApp(ctk.CTk):
         self.after(8000, tick)
 
     def _refresh_dashboard_current_status(self) -> None:
-        if not getattr(self, "_dash_current_status_var", None):
+        """Update the one-line status; uses .configure(text=) only (CTkLabel + StringVar is unreliable)."""
+        lbl = getattr(self, "_dash_status_lbl", None)
+        if lbl is None:
             return
         st = load_user_state(self.uid)
         if not st or not st.current_work_start_utc:
-            self._dash_current_status_var.set("Current Status: Clocked out")
+            lbl.configure(text="Current Status: Clocked out")
             return
         if st.current_mode == "on_break":
-            self._dash_current_status_var.set("Current Status: On break")
+            lbl.configure(text="Current Status: On break")
             return
         desc = (st.current_work_description or "").strip()
         cat_name = ""
         if st.current_work_category_id:
-            c = get_work_category(self.cfg, int(st.current_work_category_id))
-            cat_name = str(c.get("name") or "").strip() if c else ""
+            try:
+                c = get_work_category(self.cfg, int(st.current_work_category_id))
+                cat_name = str(c.get("name") or "").strip() if c else ""
+            except Exception:
+                cat_name = ""
         if cat_name and desc:
-            self._dash_current_status_var.set(f"Current Status: Working — {cat_name} / {desc}")
+            lbl.configure(text=f"Current Status: Working — {cat_name} / {desc}")
         elif cat_name:
-            self._dash_current_status_var.set(f"Current Status: Working — {cat_name}")
+            lbl.configure(text=f"Current Status: Working — {cat_name}")
         elif desc:
-            self._dash_current_status_var.set(f"Current Status: Working — {desc}")
+            lbl.configure(text=f"Current Status: Working — {desc}")
         else:
-            self._dash_current_status_var.set("Current Status: Working")
+            lbl.configure(text="Current Status: Working")
 
     def _refresh_dashboard_action_buttons(self) -> None:
         if not getattr(self, "_dash_clock_in_btn", None):
@@ -2205,7 +3338,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             left,
             text="Charts use unique clock time (overlaps are not double-counted). Open Work Log for the full entry list.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", pady=(0, 8))
         self._dash_refresh_btn = ctk.CTkButton(right, text="Refresh", width=140, command=self._refresh_dashboard)
@@ -2220,13 +3353,13 @@ class RootRecordApp(ctk.CTk):
         self._dash_clock_out_btn.pack(anchor="e", pady=(0, 2))
         self._add_help_bubble(right, "Action buttons let you refresh, add manual entries, and control the live timer.")
         self._refresh_dashboard_action_buttons()
-        self._dash_current_status_var = tk.StringVar(value="Current Status: Loading...")
-        ctk.CTkLabel(
+        self._dash_status_lbl = ctk.CTkLabel(
             left,
-            textvariable=self._dash_current_status_var,
+            text="Current Status: Loading...",
             font=ctk.CTkFont(size=13, weight="bold"),
             anchor="w",
-        ).pack(anchor="w", pady=(0, 6))
+        )
+        self._dash_status_lbl.pack(anchor="w", pady=(0, 6))
         self._dash_stats = ctk.CTkLabel(
             left,
             text="Loading…",
@@ -2259,90 +3392,177 @@ class RootRecordApp(ctk.CTk):
             return
 
         charts = ctk.CTkFrame(self._dash_host, fg_color="transparent")
-        charts.pack(fill="x", expand=False, pady=(4, 0))
+        charts.pack(fill="x", expand=False, padx=4, pady=(4, 12))
         charts.grid_columnconfigure((0, 1), weight=1, uniform="dash")
-        charts.grid_rowconfigure(0, weight=2, uniform="dashrow")
-        charts.grid_rowconfigure(1, weight=1, uniform="dashrow")
+        # Only the top chart row expands; Money stays a short strip (no huge empty band).
+        charts.grid_rowconfigure(0, weight=1)
+        charts.grid_rowconfigure(1, weight=0)
 
         left = ctk.CTkFrame(charts, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
         self._dash_fig_pie = Figure(figsize=(4.2, 3.3), dpi=100)
         self._dash_ax_pie = self._dash_fig_pie.add_subplot(111)
         self._dash_canvas_pie = FigureCanvasTkAgg(self._dash_fig_pie, master=left)
         self._dash_canvas_pie.get_tk_widget().pack(fill="both", expand=True)
 
         right = ctk.CTkFrame(charts, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
         self._dash_fig_bar = Figure(figsize=(4.2, 3.3), dpi=100)
         self._dash_ax_bar = self._dash_fig_bar.add_subplot(111)
         self._dash_canvas_bar = FigureCanvasTkAgg(self._dash_fig_bar, master=right)
         self._dash_canvas_bar.get_tk_widget().pack(fill="both", expand=True)
 
         money_fr = ctk.CTkFrame(charts, fg_color="transparent")
-        money_fr.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
-        self._dash_fig_money = Figure(figsize=(8.0, 1.8), dpi=100)
+        money_fr.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(16, 6))
+        self._dash_fig_money = Figure(figsize=(8.0, 1.35), dpi=100)
         self._dash_ax_money = self._dash_fig_money.add_subplot(111)
         self._dash_canvas_money = FigureCanvasTkAgg(self._dash_fig_money, master=money_fr)
-        self._dash_canvas_money.get_tk_widget().pack(fill="both", expand=True)
+        self._dash_canvas_money.get_tk_widget().pack(fill="x", expand=False, anchor="n")
         self.after(120, self._refresh_dashboard_layout_fit)
         top.bind("<Configure>", lambda _e: self._refresh_dashboard_layout_fit(), add="+")
 
     def _open_manual_entry_dialog(self) -> None:
-        top = ctk.CTkToplevel(self)
+        """Manual entry uses **tkinter + ttk only** — CustomTkinter widgets often fail to paint in a separate Toplevel on Windows."""
+        root_bg = self._ui_hex_color(self._theme_bg, "#1a1a1a")
+        panel_bg = self._ui_hex_color(self._theme_panel, "#2b2b2b")
+        accent = self._ui_hex_color(self._theme_accent, "#1f538d")
+        field_ch = 50
+        top = tk.Toplevel(self)
         top.title("Manual Time Entry")
+        top.configure(bg=root_bg)
         self._apply_window_icon(top)
-        top.geometry("640x520")
-        top.minsize(620, 480)
         top.transient(self)
-        top.grab_set()
+        try:
+            top.withdraw()
+        except Exception:
+            pass
 
-        ctk.CTkLabel(top, text="Start (YYYY-MM-DD HH:MM)").pack(anchor="w", padx=24, pady=(16, 4))
-        ent_start = ctk.CTkEntry(top, width=400)
-        ent_start.pack(anchor="w", padx=24)
-        ctk.CTkLabel(top, text="End (YYYY-MM-DD HH:MM)").pack(anchor="w", padx=24, pady=(10, 4))
-        ent_end = ctk.CTkEntry(top, width=400)
-        ent_end.pack(anchor="w", padx=24)
+        def close_manual() -> None:
+            self._safe_destroy_window(top)
 
-        ctk.CTkLabel(top, text="What are you doing right now?", font=ctk.CTkFont(size=15)).pack(
+        top.protocol("WM_DELETE_WINDOW", close_manual)
+
+        lbl_fg = "#DCE4EE"
+        ent_bg = "#343638"
+        ent_hl = "#565B5E"
+        font_lbl = ("Segoe UI", 12)
+        font_title = ("Segoe UI", 15, "bold")
+        font_entry = ("Segoe UI", 14)
+        font_hint = ("Segoe UI", 11)
+        font_btn = ("Segoe UI", 13)
+        cb_style = "RRManual.TCombobox"
+        try:
+            sty = ttk.Style(top)
+            sty.theme_use("clam")
+            sty.configure(
+                cb_style,
+                fieldbackground=ent_bg,
+                background=ent_bg,
+                foreground=lbl_fg,
+                arrowcolor=lbl_fg,
+                font=font_entry,
+            )
+            sty.map(cb_style, fieldbackground=[("readonly", ent_bg)], background=[("readonly", ent_bg)])
+            try:
+                sty.configure(cb_style, padding=(8, 5))
+            except tk.TclError:
+                pass
+        except Exception:
+            cb_style = "TCombobox"
+
+        body = tk.Frame(top, bg=panel_bg)
+        body.pack(fill="both", expand=False)
+
+        e_kw: dict[str, Any] = {
+            "bg": ent_bg,
+            "fg": lbl_fg,
+            "insertbackground": lbl_fg,
+            "relief": "flat",
+            "font": font_entry,
+            "width": field_ch,
+            "highlightthickness": 1,
+            "highlightbackground": ent_hl,
+            "highlightcolor": ent_hl,
+        }
+        entry_pack = {"anchor": "w", "padx": 24, "ipady": 5}
+
+        tk.Label(body, text="Start (YYYY-MM-DD HH:MM)", bg=panel_bg, fg=lbl_fg, font=font_lbl).pack(
+            anchor="w", padx=24, pady=(20, 6)
+        )
+        ent_start = tk.Entry(body, **e_kw)
+        ent_start.pack(**entry_pack)
+        tk.Label(body, text="End (YYYY-MM-DD HH:MM)", bg=panel_bg, fg=lbl_fg, font=font_lbl).pack(
             anchor="w", padx=24, pady=(14, 6)
         )
-        ent_desc = ctk.CTkEntry(top, width=400, placeholder_text="Short label for your current task…")
-        ent_desc.pack(anchor="w", padx=24, pady=(0, 6))
+        ent_end = tk.Entry(body, **e_kw)
+        ent_end.pack(**entry_pack)
+
+        tk.Label(
+            body,
+            text="What are you doing right now?",
+            bg=panel_bg,
+            fg=lbl_fg,
+            font=font_title,
+        ).pack(anchor="w", padx=24, pady=(18, 8))
+        ent_desc = tk.Entry(body, **e_kw)
+        ent_desc.pack(anchor="w", padx=24, pady=(0, 8), ipady=5)
 
         cats = list_work_categories(self.cfg, self.uid)
         cat_map: dict[str, int | None] = {}
         for c in cats:
             cat_map[c["name"]] = int(c["id"])
         cat_keys = list(cat_map.keys())
-        cat_row = ctk.CTkFrame(top, fg_color="transparent")
-        cat_row.pack(fill="x", padx=24, pady=(2, 4))
-        ctk.CTkLabel(cat_row, text="Category").pack(side="left")
-        cmb_cat = ctk.CTkComboBox(cat_row, values=cat_keys or ["—"], width=200)
+        cat_row = tk.Frame(body, bg=panel_bg)
+        cat_row.pack(fill="x", padx=24, pady=(6, 4))
+        tk.Label(cat_row, text="Category", bg=panel_bg, fg=lbl_fg, font=font_lbl).pack(side="left")
+        cmb_cat = ttk.Combobox(cat_row, values=cat_keys or ["—"], width=field_ch, state="readonly", style=cb_style)
         cmb_cat.set(_default_activity_category_label(cat_keys) if cat_keys else "—")
-        cmb_cat.pack(side="left", padx=8)
-        ctk.CTkButton(
+        cmb_cat.pack(side="left", padx=(10, 8))
+        tk.Button(
             cat_row,
             text="Add",
-            width=52,
+            font=font_btn,
+            bg=accent,
+            fg="#f0f0f0",
+            activebackground=accent,
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=14,
+            pady=6,
             command=lambda: self._quick_add_category_to_map(cmb_cat, cat_map),
         ).pack(side="left")
-        other_manual_cat = ctk.CTkEntry(top, width=180, placeholder_text="Other category")
-        other_manual_cat.pack(anchor="w", padx=24, pady=(0, 4))
+
+        tk.Label(
+            body,
+            text="Other category (optional — overrides dropdown if set)",
+            bg=panel_bg,
+            fg=lbl_fg,
+            font=font_hint,
+        ).pack(anchor="w", padx=24, pady=(4, 4))
+        other_manual_cat = tk.Entry(body, **e_kw)
+        other_manual_cat.pack(anchor="w", padx=24, pady=(0, 6), ipady=5)
 
         prows = list_projects(self.cfg, self.uid)
         proj_map: dict[str, int | None] = {"—": None}
         for p in prows:
             proj_map[p["name"]] = int(p["id"])
-        proj_row = ctk.CTkFrame(top, fg_color="transparent")
-        proj_row.pack(fill="x", padx=24, pady=(0, 6))
-        ctk.CTkLabel(proj_row, text="Project").pack(side="left")
-        cmb_proj = ctk.CTkComboBox(proj_row, values=list(proj_map.keys()), width=160)
+        proj_row = tk.Frame(body, bg=panel_bg)
+        proj_row.pack(fill="x", padx=24, pady=(4, 8))
+        tk.Label(proj_row, text="Project", bg=panel_bg, fg=lbl_fg, font=font_lbl).pack(side="left")
+        cmb_proj = ttk.Combobox(proj_row, values=list(proj_map.keys()), width=field_ch, state="readonly", style=cb_style)
         cmb_proj.set("—")
-        cmb_proj.pack(side="left", padx=14)
-        ctk.CTkButton(
+        cmb_proj.pack(side="left", padx=(10, 8))
+        tk.Button(
             proj_row,
             text="Add",
-            width=52,
+            font=font_btn,
+            bg=accent,
+            fg="#f0f0f0",
+            activebackground=accent,
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=14,
+            pady=6,
             command=lambda: self._quick_add_project_to_map(cmb_proj, proj_map),
         ).pack(side="left")
 
@@ -2357,7 +3577,7 @@ class RootRecordApp(ctk.CTk):
             seed_desc = saved_desc
         if seed_desc:
             ent_desc.insert(0, seed_desc)
-            ent_desc.icursor("end")
+            ent_desc.icursor(tk.END)
         saved_cat = str(settings_get(self.cfg, "last_popup_category_name", "") or "").strip()
         if saved_cat and saved_cat in cat_map:
             cmb_cat.set(saved_cat)
@@ -2450,25 +3670,64 @@ class RootRecordApp(ctk.CTk):
                 self._refresh_calendar()
             except Exception:
                 pass
-            top.destroy()
+            close_manual()
 
-        ctk.CTkLabel(
-            top,
-            text="Press Enter or click Submit",
-            text_color="gray",
-            font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=24, pady=(4, 4))
-        action_row = ctk.CTkFrame(top, fg_color="transparent")
-        action_row.pack(fill="x", padx=24, pady=(4, 14))
-        ctk.CTkButton(action_row, text="Submit", width=120, command=submit).pack(side="left")
-        ctk.CTkButton(
+        tk.Label(body, text="Press Enter or click Submit", bg=panel_bg, fg="#9eb0c4", font=font_hint).pack(
+            anchor="w", padx=24, pady=(8, 8)
+        )
+        action_row = tk.Frame(body, bg=panel_bg)
+        action_row.pack(fill="x", padx=24, pady=(8, 20))
+        tk.Button(
+            action_row,
+            text="Submit",
+            font=font_btn,
+            bg=accent,
+            fg="#f8f8f8",
+            activebackground=accent,
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=submit,
+        ).pack(side="left")
+        tk.Button(
             action_row,
             text="Cancel",
-            width=120,
-            fg_color=("gray75", "gray28"),
-            command=top.destroy,
-        ).pack(side="left", padx=8)
+            font=font_btn,
+            bg="#4a4a4a",
+            fg="#f0f0f0",
+            activebackground="#3d3d3d",
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=close_manual,
+        ).pack(side="left", padx=12)
         ent_desc.bind("<Return>", lambda _e: submit())
+        try:
+            top.update_idletasks()
+            win_w = max(620, min(980, top.winfo_reqwidth()))
+            win_h = max(360, min(820, top.winfo_reqheight()))
+            top.geometry(f"{win_w}x{win_h}")
+            top.minsize(560, 320)
+            top.deiconify()
+            top.update()
+        except Exception:
+            pass
+        self._apply_window_icon(top)
+        try:
+            top.after(150, lambda w=top: self._apply_window_icon(w))
+        except Exception:
+            pass
+        try:
+            top.lift()
+            top.focus_force()
+            ent_start.focus_set()
+        except Exception:
+            pass
+        try:
+            top.grab_set()
+        except Exception:
+            pass
 
     def _build_time(self) -> None:
         t = self.tabview.tab("Time")
@@ -2588,38 +3847,89 @@ class RootRecordApp(ctk.CTk):
         initial: str = "",
         ok_text: str = "Add",
     ) -> str | None:
-        top = ctk.CTkToplevel(self)
+        m = self._tk_modal_theme()
+        top = tk.Toplevel(self)
         top.title(title)
+        top.configure(bg=m["root_bg"])
         self._apply_window_icon(top)
-        top.geometry("460x190")
+        top.geometry("560x240")
+        top.minsize(480, 200)
         top.transient(self)
-        top.grab_set()
-        ctk.CTkLabel(top, text=prompt, font=ctk.CTkFont(size=14)).pack(anchor="w", padx=16, pady=(14, 8))
-        ent = ctk.CTkEntry(top, width=420, placeholder_text=placeholder)
-        ent.pack(anchor="w", padx=16)
+        body = tk.Frame(top, bg=m["panel_bg"])
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=prompt, bg=m["panel_bg"], fg=m["heading"], font=m["font_title"]).pack(
+            anchor="w", padx=20, pady=(18, 8)
+        )
+        if placeholder:
+            tk.Label(body, text=placeholder, bg=m["panel_bg"], fg="#9eb0c4", font=m["font_hint"]).pack(
+                anchor="w", padx=20, pady=(0, 4)
+            )
+        e_kw: dict[str, Any] = {
+            "bg": m["ent_bg"],
+            "fg": m["lbl_fg"],
+            "insertbackground": m["lbl_fg"],
+            "relief": "flat",
+            "font": m["font_entry"],
+            "width": 52,
+            "highlightthickness": 1,
+            "highlightbackground": m["ent_hl"],
+            "highlightcolor": m["ent_hl"],
+        }
+        ent = tk.Entry(body, **e_kw)
+        ent.pack(anchor="w", padx=20, pady=(4, 12), ipady=6)
         if initial:
             ent.insert(0, initial)
-            ent.select_range(0, "end")
+            ent.select_range(0, tk.END)
         ent.focus_set()
         result: dict[str, str | None] = {"value": None}
 
         def submit() -> None:
             txt = ent.get().strip()
             result["value"] = txt if txt else None
-            top.destroy()
+            self._safe_destroy_window(top)
 
         def cancel() -> None:
             result["value"] = None
-            top.destroy()
+            self._safe_destroy_window(top)
 
-        row = ctk.CTkFrame(top, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=14)
-        ctk.CTkButton(row, text=ok_text, width=110, command=submit).pack(side="left")
-        ctk.CTkButton(row, text="Cancel", width=110, fg_color=("gray75", "gray28"), command=cancel).pack(
-            side="left", padx=8
-        )
+        row = tk.Frame(body, bg=m["panel_bg"])
+        row.pack(fill="x", padx=20, pady=(8, 18))
+        tk.Button(
+            row,
+            text=ok_text,
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#f8f8f8",
+            activebackground=m["accent"],
+            relief="flat",
+            padx=20,
+            pady=10,
+            command=submit,
+        ).pack(side="left")
+        tk.Button(
+            row,
+            text="Cancel",
+            font=m["font_btn"],
+            bg="#4a4a4a",
+            fg="#f0f0f0",
+            activebackground="#3d3d3d",
+            relief="flat",
+            padx=20,
+            pady=10,
+            command=cancel,
+        ).pack(side="left", padx=10)
         ent.bind("<Return>", lambda _e: submit())
         top.bind("<Escape>", lambda _e: cancel())
+        top.protocol("WM_DELETE_WINDOW", cancel)
+        try:
+            top.update_idletasks()
+        except Exception:
+            pass
+        self._apply_window_icon(top)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
         self.wait_window(top)
         return result["value"]
 
@@ -2716,41 +4026,127 @@ class RootRecordApp(ctk.CTk):
         return wc, pid, (tag_ids or None)
 
     def _pick_from_scrollable_list(self, title: str, options: list[str]) -> str | None:
-        top = ctk.CTkToplevel(self)
+        m = self._tk_modal_theme()
+        top = tk.Toplevel(self)
         top.title(title)
+        top.configure(bg=m["root_bg"])
         self._apply_window_icon(top)
-        top.geometry("420x460")
+        top.geometry("600x560")
+        top.minsize(480, 420)
         top.transient(self)
-        top.grab_set()
-        ctk.CTkLabel(top, text=title, font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=12, pady=(10, 6))
-        search = ctk.CTkEntry(top, width=392, placeholder_text="Filter...")
-        search.pack(anchor="w", padx=12, pady=(0, 8))
-        wrap = ctk.CTkScrollableFrame(top, height=340)
-        wrap.pack(fill="both", expand=True, padx=10, pady=4)
+        body = tk.Frame(top, bg=m["panel_bg"])
+        body.pack(fill="both", expand=True)
         result: dict[str, str | None] = {"value": None}
         current: dict[str, list[str]] = {"vals": list(options)}
 
-        def redraw(vals: list[str]) -> None:
-            for w in wrap.winfo_children():
-                w.destroy()
-            for name in vals:
-                ctk.CTkButton(
-                    wrap,
-                    text=name,
-                    anchor="w",
-                    command=lambda n=name: (result.__setitem__("value", n), top.destroy()),
-                ).pack(fill="x", pady=2)
+        def pick_and_close(n: str) -> None:
+            result["value"] = n
+            self._safe_destroy_window(top)
+
+        def cancel_pick() -> None:
+            result["value"] = None
+            self._safe_destroy_window(top)
+
+        tk.Label(body, text=title, bg=m["panel_bg"], fg=m["heading"], font=m["font_title"]).pack(
+            anchor="w", padx=16, pady=(14, 8)
+        )
+        tk.Label(body, text="Filter…", bg=m["panel_bg"], fg="#9eb0c4", font=m["font_hint"]).pack(
+            anchor="w", padx=16, pady=(0, 4)
+        )
+        e_kw: dict[str, Any] = {
+            "bg": m["ent_bg"],
+            "fg": m["lbl_fg"],
+            "insertbackground": m["lbl_fg"],
+            "relief": "flat",
+            "font": m["font_entry"],
+            "width": 58,
+            "highlightthickness": 1,
+            "highlightbackground": m["ent_hl"],
+            "highlightcolor": m["ent_hl"],
+        }
+        search = tk.Entry(body, **e_kw)
+        search.pack(anchor="w", padx=16, pady=(0, 8), ipady=5)
+
+        list_fr = tk.Frame(body, bg=m["panel_bg"])
+        list_fr.pack(fill="both", expand=True, padx=16, pady=4)
+        scroll = tk.Scrollbar(list_fr)
+        scroll.pack(side="right", fill="y")
+        lb = tk.Listbox(
+            list_fr,
+            yscrollcommand=scroll.set,
+            bg=m["ent_bg"],
+            fg=m["lbl_fg"],
+            font=m["font_entry"],
+            selectbackground=m["accent"],
+            selectforeground="#ffffff",
+            height=18,
+            width=64,
+            activestyle="dotbox",
+        )
+        lb.pack(side="left", fill="both", expand=True)
+        scroll.config(command=lb.yview)
+
+        def refill(vals: list[str]) -> None:
+            lb.delete(0, tk.END)
+            for x in vals:
+                lb.insert(tk.END, x)
+            if vals:
+                lb.selection_set(0)
+
+        def pick_selected(_e: object = None) -> None:
+            sel = lb.curselection()
+            if not sel:
+                return
+            pick_and_close(lb.get(sel[0]))
 
         def on_search(_e: object = None) -> None:
             q = search.get().strip().lower()
             if not q:
-                redraw(current["vals"])
+                refill(current["vals"])
                 return
-            redraw([x for x in current["vals"] if q in x.lower()])
+            refill([x for x in current["vals"] if q in x.lower()])
 
-        redraw(current["vals"])
+        refill(current["vals"])
         search.bind("<KeyRelease>", on_search)
-        ctk.CTkButton(top, text="Cancel", command=top.destroy).pack(anchor="e", padx=12, pady=10)
+        lb.bind("<Double-Button-1>", pick_selected)
+
+        btn_row = tk.Frame(body, bg=m["panel_bg"])
+        btn_row.pack(fill="x", padx=16, pady=14)
+        tk.Button(
+            btn_row,
+            text="OK",
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#ffffff",
+            activebackground=m["accent"],
+            relief="flat",
+            padx=20,
+            pady=10,
+            command=pick_selected,
+        ).pack(side="left")
+        tk.Button(
+            btn_row,
+            text="Cancel",
+            font=m["font_btn"],
+            bg="#4a4a4a",
+            fg="#f0f0f0",
+            activebackground="#3d3d3d",
+            relief="flat",
+            padx=20,
+            pady=10,
+            command=cancel_pick,
+        ).pack(side="left", padx=10)
+        top.protocol("WM_DELETE_WINDOW", cancel_pick)
+        try:
+            top.update_idletasks()
+        except Exception:
+            pass
+        self._apply_window_icon(top)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        search.focus_set()
         self.wait_window(top)
         return result["value"]
 
@@ -2765,39 +4161,76 @@ class RootRecordApp(ctk.CTk):
             combo.set(choice)
 
     def _prompt_clock_in_context(self, default_desc: str) -> tuple[str, int | None, int | None] | None:
-        top = ctk.CTkToplevel(self)
+        m = self._tk_modal_theme()
+        top = tk.Toplevel(self)
         top.title("Start Work")
+        top.configure(bg=m["root_bg"])
         self._apply_window_icon(top)
-        top.geometry("560x280")
+        top.geometry("780x420")
+        top.minsize(720, 380)
         top.transient(self)
-        top.grab_set()
+        body = tk.Frame(top, bg=m["panel_bg"])
+        body.pack(fill="both", expand=True)
+        cb_style = self._tk_modal_configure_combobox_style(top, "RRStart.TCombobox", m)
+        e_kw: dict[str, Any] = {
+            "bg": m["ent_bg"],
+            "fg": m["lbl_fg"],
+            "insertbackground": m["lbl_fg"],
+            "relief": "flat",
+            "font": m["font_entry"],
+            "width": 58,
+            "highlightthickness": 1,
+            "highlightbackground": m["ent_hl"],
+            "highlightcolor": m["ent_hl"],
+        }
 
-        ctk.CTkLabel(top, text="What are you starting to work on?", font=ctk.CTkFont(size=15, weight="bold")).pack(
-            anchor="w", padx=18, pady=(14, 8)
+        tk.Label(
+            body,
+            text="What are you starting to work on?",
+            bg=m["panel_bg"],
+            fg=m["heading"],
+            font=m["font_title"],
+        ).pack(anchor="w", padx=24, pady=(20, 8))
+        tk.Label(body, text="Short task description", bg=m["panel_bg"], fg="#9eb0c4", font=m["font_hint"]).pack(
+            anchor="w", padx=24, pady=(0, 4)
         )
-        ent_desc = ctk.CTkEntry(top, width=510, placeholder_text="Short task description")
-        ent_desc.pack(anchor="w", padx=18)
+        ent_desc = tk.Entry(body, **e_kw)
+        ent_desc.pack(anchor="w", padx=24, pady=(0, 12), ipady=6)
         if default_desc:
             ent_desc.insert(0, default_desc)
 
         cats = list_work_categories(self.cfg, self.uid)
         cat_map: dict[str, int] = {str(c["name"]): int(c["id"]) for c in cats}
-        ctk.CTkLabel(top, text="Category").pack(anchor="w", padx=18, pady=(10, 4))
-        cmb_cat = ctk.CTkComboBox(top, values=list(cat_map.keys()) or ["—"], width=300)
+        tk.Label(body, text="Category", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+            anchor="w", padx=24, pady=(6, 4)
+        )
+        cat_row = tk.Frame(body, bg=m["panel_bg"])
+        cat_row.pack(fill="x", padx=24, pady=(0, 8))
+        cmb_cat = ttk.Combobox(
+            cat_row,
+            values=list(cat_map.keys()) or ["—"],
+            width=48,
+            state="readonly",
+            style=cb_style,
+        )
         if cat_map:
             cmb_cat.set(list(cat_map.keys())[0])
         else:
             cmb_cat.set("—")
-        cmb_cat.pack(anchor="w", padx=18)
+        cmb_cat.pack(side="left", fill="x", expand=True)
 
         prows = list_projects(self.cfg, self.uid)
         proj_map: dict[str, int | None] = {"—": None}
         for p in prows:
             proj_map[str(p["name"])] = int(p["id"])
-        ctk.CTkLabel(top, text="Project (optional)").pack(anchor="w", padx=18, pady=(10, 4))
-        cmb_proj = ctk.CTkComboBox(top, values=list(proj_map.keys()), width=300)
+        tk.Label(body, text="Project (optional)", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+            anchor="w", padx=24, pady=(6, 4)
+        )
+        proj_row = tk.Frame(body, bg=m["panel_bg"])
+        proj_row.pack(fill="x", padx=24, pady=(0, 12))
+        cmb_proj = ttk.Combobox(proj_row, values=list(proj_map.keys()), width=48, state="readonly", style=cb_style)
         cmb_proj.set("—")
-        cmb_proj.pack(anchor="w", padx=18)
+        cmb_proj.pack(side="left", fill="x", expand=True)
 
         result: dict[str, str | int | None] = {"desc": None, "wc": None, "pid": None}
 
@@ -2811,16 +4244,49 @@ class RootRecordApp(ctk.CTk):
             result["desc"] = desc
             result["wc"] = wc
             result["pid"] = proj_map.get(cmb_proj.get().strip())
-            top.destroy()
+            self._safe_destroy_window(top)
 
         def cancel() -> None:
-            top.destroy()
+            self._safe_destroy_window(top)
 
-        row = ctk.CTkFrame(top, fg_color="transparent")
-        row.pack(fill="x", padx=18, pady=14)
-        ctk.CTkButton(row, text="Start", width=120, command=submit).pack(side="left")
-        ctk.CTkButton(row, text="Cancel", width=120, command=cancel).pack(side="left", padx=8)
+        row = tk.Frame(body, bg=m["panel_bg"])
+        row.pack(fill="x", padx=24, pady=(8, 22))
+        tk.Button(
+            row,
+            text="Start",
+            font=m["font_btn"],
+            bg=m["accent"],
+            fg="#f8f8f8",
+            activebackground=m["accent"],
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=submit,
+        ).pack(side="left")
+        tk.Button(
+            row,
+            text="Cancel",
+            font=m["font_btn"],
+            bg="#4a4a4a",
+            fg="#f0f0f0",
+            activebackground="#3d3d3d",
+            relief="flat",
+            padx=22,
+            pady=10,
+            command=cancel,
+        ).pack(side="left", padx=12)
         ent_desc.bind("<Return>", lambda _e: submit())
+        top.protocol("WM_DELETE_WINDOW", cancel)
+        try:
+            top.update_idletasks()
+        except Exception:
+            pass
+        self._apply_window_icon(top)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        ent_desc.focus_set()
         self.wait_window(top)
         if result["desc"] is None:
             return None
@@ -2901,7 +4367,65 @@ class RootRecordApp(ctk.CTk):
         except Exception:
             pass
 
-    def _quick_add_category_to_map(self, cmb: ctk.CTkComboBox, cat_map: dict[str, int | None]) -> None:
+    def _combo_apply_values(self, cmb: Any, values: list[str]) -> None:
+        """CTkComboBox and ttk.Combobox both support updating the option list (manual dialog uses ttk)."""
+        try:
+            cmb.configure(values=values)
+            return
+        except Exception:
+            pass
+        try:
+            cmb["values"] = values
+        except Exception:
+            pass
+
+    @staticmethod
+    def _ui_hex_color(val: Any, fallback: str = "#1a1a1a") -> str:
+        if isinstance(val, str) and val.startswith("#"):
+            return val
+        if isinstance(val, (list, tuple)) and len(val) > 0:
+            return str(val[-1])
+        return fallback
+
+    def _tk_modal_theme(self) -> dict[str, Any]:
+        """Shared colors/fonts for tk/ttk modal dialogs (CTk popups often blank on Windows)."""
+        return {
+            "root_bg": self._ui_hex_color(self._theme_bg, "#1a1a1a"),
+            "panel_bg": self._ui_hex_color(self._theme_panel, "#2b2b2b"),
+            "accent": self._ui_hex_color(self._theme_accent, "#1f538d"),
+            "heading": self._ui_hex_color(self._theme_text_heading, "#E0E6F0"),
+            "lbl_fg": "#DCE4EE",
+            "ent_bg": "#343638",
+            "ent_hl": "#565B5E",
+            "font_lbl": ("Segoe UI", 12),
+            "font_title": ("Segoe UI", 15, "bold"),
+            "font_entry": ("Segoe UI", 14),
+            "font_hint": ("Segoe UI", 11),
+            "font_btn": ("Segoe UI", 13),
+        }
+
+    def _tk_modal_configure_combobox_style(self, top: tk.Misc, style_name: str, m: dict[str, Any]) -> str:
+        try:
+            sty = ttk.Style(top)
+            sty.theme_use("clam")
+            sty.configure(
+                style_name,
+                fieldbackground=m["ent_bg"],
+                background=m["ent_bg"],
+                foreground=m["lbl_fg"],
+                arrowcolor=m["lbl_fg"],
+                font=m["font_entry"],
+            )
+            try:
+                sty.configure(style_name, padding=(8, 5))
+            except tk.TclError:
+                pass
+            sty.map(style_name, fieldbackground=[("readonly", m["ent_bg"])], background=[("readonly", m["ent_bg"])])
+            return style_name
+        except Exception:
+            return "TCombobox"
+
+    def _quick_add_category_to_map(self, cmb: Any, cat_map: dict[str, int | None]) -> None:
         name = self._ask_text_dialog(
             title="Add Category",
             prompt="Category name",
@@ -2916,13 +4440,13 @@ class RootRecordApp(ctk.CTk):
         upsert_work_category(self.cfg, self.uid, clean)
         cid = next((int(c["id"]) for c in list_work_categories(self.cfg, self.uid) if c["name"] == clean), None)
         cat_map[clean] = cid
-        cmb.configure(values=list(cat_map.keys()))
+        self._combo_apply_values(cmb, list(cat_map.keys()))
         cmb.set(clean)
 
-    def _quick_add_category_from_popup(self, cmb: ctk.CTkComboBox) -> None:
+    def _quick_add_category_from_popup(self, cmb: Any) -> None:
         self._quick_add_category_to_map(cmb, self._popup_cat_map)
 
-    def _quick_add_project_to_map(self, cmb: ctk.CTkComboBox, proj_map: dict[str, int | None]) -> None:
+    def _quick_add_project_to_map(self, cmb: Any, proj_map: dict[str, int | None]) -> None:
         name = self._ask_text_dialog(
             title="Add Project",
             prompt="Project name",
@@ -2937,10 +4461,10 @@ class RootRecordApp(ctk.CTk):
         insert_project(self.cfg, self.uid, clean)
         pid = next((int(p["id"]) for p in list_projects(self.cfg, self.uid) if p["name"] == clean), None)
         proj_map[clean] = pid
-        cmb.configure(values=list(proj_map.keys()))
+        self._combo_apply_values(cmb, list(proj_map.keys()))
         cmb.set(clean)
 
-    def _quick_add_project_from_popup(self, cmb: ctk.CTkComboBox) -> None:
+    def _quick_add_project_from_popup(self, cmb: Any) -> None:
         self._quick_add_project_to_map(cmb, self._popup_proj_map)
 
     def _log_from_values(
@@ -2981,7 +4505,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(income, text="Income amount (major units e.g. 350.00)").grid(row=0, column=0, padx=4, pady=4)
         self._inc_amt = ctk.CTkEntry(income, width=120)
         self._inc_amt.grid(row=0, column=1, padx=4)
-        hb_inc = ctk.CTkLabel(income, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_inc = ctk.CTkLabel(income, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_inc.grid(row=0, column=3, padx=(4, 0), sticky="w")
         self._attach_tooltip(hb_inc, "Adds to Income totals (Dashboard, Reports, Tax Estimator net profit).")
         self._inc_cur = ctk.CTkComboBox(income, values=["USD", "EUR", "GBP", "CAD"], width=100)
@@ -3008,7 +4532,7 @@ class RootRecordApp(ctk.CTk):
         )
         self._exp_funding.set("cash")
         self._exp_funding.grid(row=0, column=4, padx=4)
-        hb_funding = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_funding = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_funding.grid(row=0, column=5, padx=(2, 0), sticky="w")
         self._attach_tooltip(
             hb_funding,
@@ -3018,7 +4542,7 @@ class RootRecordApp(ctk.CTk):
         self._exp_desc = ctk.CTkEntry(form, width=400)
         self._exp_desc.grid(row=1, column=1, columnspan=4, sticky="ew", padx=4)
         ctk.CTkButton(form, text="Add expense", command=self._on_add_expense).grid(row=2, column=1, pady=8)
-        hb_exp = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_exp = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_exp.grid(row=2, column=2, padx=(4, 0), sticky="w")
         self._attach_tooltip(
             hb_exp,
@@ -3039,7 +4563,7 @@ class RootRecordApp(ctk.CTk):
         self._sch_exp_freq = ctk.CTkComboBox(sched, values=["daily", "weekly", "monthly"], width=110)
         self._sch_exp_freq.set("monthly")
         self._sch_exp_freq.grid(row=1, column=3, padx=4)
-        hb_sched = ctk.CTkLabel(sched, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_sched = ctk.CTkLabel(sched, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_sched.grid(row=1, column=7, padx=(4, 0), sticky="w")
         self._attach_tooltip(hb_sched, "Auto-posts due expense rows. Posted rows reduce net profit just like manual expenses.")
         ctk.CTkLabel(sched, text="First due (YYYY-MM-DD)").grid(row=1, column=4, padx=4)
@@ -3086,7 +4610,7 @@ class RootRecordApp(ctk.CTk):
         self._res_desc = ctk.CTkEntry(res, width=360, placeholder_text="Description")
         self._res_desc.grid(row=1, column=4, columnspan=2, padx=4, sticky="ew")
         ctk.CTkButton(res, text="Add resource", command=self._on_add_resource).grid(row=1, column=6, padx=6)
-        hb_res = ctk.CTkLabel(res, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_res = ctk.CTkLabel(res, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_res.grid(row=1, column=7, padx=(2, 0), sticky="w")
         if not hasattr(self, "_help_bubbles"):
             self._help_bubbles = []
@@ -3127,7 +4651,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkButton(avail, text="Save account", command=self._on_save_available_funds_account).grid(
             row=1, column=10, padx=6
         )
-        hb_av = ctk.CTkLabel(avail, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_av = ctk.CTkLabel(avail, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_av.grid(row=1, column=11, padx=(2, 0), sticky="w")
         self._attach_tooltip(
             hb_av,
@@ -3462,7 +4986,7 @@ class RootRecordApp(ctk.CTk):
         self._debt_desc = ctk.CTkEntry(form, width=540)
         self._debt_desc.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
         ctk.CTkButton(form, text="Add debt", command=self._on_add_debt).grid(row=2, column=1, pady=8)
-        hb_debt = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_debt = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_debt.grid(row=2, column=2, padx=(4, 0), sticky="w")
         self._attach_tooltip(
             hb_debt,
@@ -3554,7 +5078,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             t,
             text="Track billing contacts; link them to invoices and scheduled meetings.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
         form = ctk.CTkFrame(t)
         form.pack(fill="x", pady=6)
@@ -3578,7 +5102,7 @@ class RootRecordApp(ctk.CTk):
         self._cl_tax = ctk.CTkEntry(form, width=220, placeholder_text="Tax ID / VAT")
         self._cl_tax.grid(row=5, column=1, columnspan=2, sticky="w", padx=4, pady=4)
         ctk.CTkLabel(form, text="Tax ID").grid(row=5, column=0, padx=4, sticky="e")
-        hb_client_tax = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_client_tax = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_client_tax.grid(row=5, column=3, padx=(2, 0), pady=4, sticky="w")
         self._attach_tooltip(
             hb_client_tax,
@@ -3696,7 +5220,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             t,
             text="Draft invoices, line items (description | qty | unit price), PDF for clients.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
         top = ctk.CTkFrame(t, fg_color="transparent")
         top.pack(fill="x", pady=4)
@@ -3733,7 +5257,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(meta, text="Tax (major)").grid(row=2, column=2, padx=4, pady=4, sticky="e")
         self._inv_tax = ctk.CTkEntry(meta, width=100, placeholder_text="0")
         self._inv_tax.grid(row=2, column=3, padx=4, pady=4, sticky="w")
-        hb_inv_tax = ctk.CTkLabel(meta, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_inv_tax = ctk.CTkLabel(meta, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_inv_tax.grid(row=2, column=4, padx=(2, 0), pady=4, sticky="w")
         self._attach_tooltip(
             hb_inv_tax,
@@ -3965,7 +5489,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             t,
             text="Meetings and deadlines (times in your Business timezone / system local).",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
         form = ctk.CTkFrame(t)
         form.pack(fill="x", pady=6)
@@ -3980,7 +5504,7 @@ class RootRecordApp(ctk.CTk):
         self._sch_end = ctk.CTkEntry(form, width=180, placeholder_text="End (optional)")
         self._sch_end.grid(row=2, column=2, padx=4, pady=4, sticky="w")
         ctk.CTkLabel(form, text="Start / End").grid(row=2, column=0, padx=4, sticky="e")
-        hb_sch_time = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_sch_time = ctk.CTkLabel(form, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_sch_time.grid(row=2, column=4, padx=(4, 0), sticky="w")
         self._attach_tooltip(hb_sch_time, "Use local time format YYYY-MM-DD HH:MM. End is optional.")
         ctk.CTkLabel(form, text="Client").grid(row=3, column=0, padx=4, pady=4, sticky="e")
@@ -4250,7 +5774,7 @@ class RootRecordApp(ctk.CTk):
                 "Estimate taxes from tracked Income and Expenses for a selected range. "
                 "Rates are editable and saved in Settings."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             wraplength=820,
             justify="left",
         ).pack(anchor="w", pady=(0, 10))
@@ -4305,7 +5829,7 @@ class RootRecordApp(ctk.CTk):
         self._tax_rate_se = ctk.CTkEntry(rates, width=90)
         self._tax_rate_se.insert(0, str(float(settings_get(self.cfg, "tax_rate_self_employment_pct", 15.3))))
         self._tax_rate_se.grid(row=0, column=5, padx=8, pady=8, sticky="w")
-        hb_rates = ctk.CTkLabel(rates, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_rates = ctk.CTkLabel(rates, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_rates.grid(row=0, column=6, padx=(2, 0), pady=8, sticky="w")
         self._attach_tooltip(
             hb_rates,
@@ -4427,7 +5951,7 @@ class RootRecordApp(ctk.CTk):
                 "Use Supplies for everything else—office basics, raw materials that go into products, packaging, parts—"
                 "and use Category to tell them apart (e.g. Office, Production, Packaging)."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=12),
             wraplength=720,
             justify="left",
@@ -4443,7 +5967,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             scroll,
             text="SKUs, on-hand counts, reorder hints, optional unit cost and price.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
         ).pack(anchor="w", pady=(0, 6))
         form = ctk.CTkFrame(scroll)
@@ -4506,7 +6030,7 @@ class RootRecordApp(ctk.CTk):
                 "Consumables and inputs—not the customer-facing catalog. "
                 "Category is free-form: try Office, Production / raw, Packaging, or Parts so you can scan the list quickly."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=720,
             justify="left",
@@ -4806,7 +6330,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             head,
             text=f"Version {APP_VERSION}",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", pady=(0, 6))
 
@@ -4866,24 +6390,7 @@ class RootRecordApp(ctk.CTk):
             command=lambda: webbrowser.open("https://rootrecord.info/contact"),
         ).pack(side="left", padx=4)
 
-        self._about_image_ctk = None
-        about_img_candidates: list[Path] = []
-        if getattr(sys, "frozen", False):
-            about_img_candidates.append(Path(sys.executable).resolve().parent / "about page grahic.jpg")
-        about_img_candidates.append(Path(__file__).resolve().parent / "about page grahic.jpg")
-        about_img_candidates.append(Path(__file__).resolve().parents[2] / "about page grahic.jpg")
-        img_path = next((p for p in about_img_candidates if p.is_file()), None)
-        if img_path is not None:
-            try:
-                from PIL import Image
-
-                pil = Image.open(img_path).convert("RGB")
-                self._about_image_ctk = ctk.CTkImage(light_image=pil, dark_image=pil, size=(420, 420))
-                ctk.CTkLabel(right, text="", image=self._about_image_ctk).pack(fill="both", expand=True)
-            except Exception:
-                ctk.CTkLabel(right, text="About image could not be loaded.", text_color="gray").pack(
-                    anchor="n", pady=12
-                )
+        self._pack_about_side_image(right)
 
         help_tab = pages.tab("Help")
         ctk.CTkLabel(
@@ -4894,12 +6401,430 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             help_tab,
             text="Overview of features, data, and workflows. Your database file path is shown in the footer.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
         help_box = ctk.CTkTextbox(help_tab, font=ctk.CTkFont(family="Consolas", size=12))
         help_box.pack(fill="both", expand=True, pady=4)
         help_box.insert("0.0", USER_GUIDE.strip() + "\n")
         help_box.configure(state="disabled")
+
+    def _build_billing(self) -> None:
+        """Top-level sidebar page (not nested inside About & Help)."""
+        self._billing_poll_after = None
+        billing_tab = self.tabview.tab("Billing")
+        ctk.CTkLabel(
+            billing_tab,
+            text="Your subscription",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+        ctk.CTkLabel(
+            billing_tab,
+            text="Manage your plan and activation.",
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=13),
+            wraplength=920,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(0, 12))
+
+        bill_scroll = ctk.CTkScrollableFrame(billing_tab, fg_color="transparent")
+        bill_scroll.pack(fill="both", expand=True, padx=6, pady=(0, 12))
+
+        hero = ctk.CTkFrame(bill_scroll, fg_color=self._theme_nav_active, corner_radius=16)
+        hero.pack(fill="x", pady=(0, 16))
+        hero_inner = ctk.CTkFrame(hero, fg_color="transparent")
+        hero_inner.pack(fill="x", padx=22, pady=20)
+        self._billing_hero_title_lbl = ctk.CTkLabel(
+            hero_inner,
+            text="Loading…",
+            text_color=self._theme_text_heading,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+            justify="left",
+        )
+        self._billing_hero_title_lbl.pack(anchor="w", fill="x")
+        self._billing_hero_sub_lbl = ctk.CTkLabel(
+            hero_inner,
+            text="",
+            text_color=self._theme_billing_hero_sub,
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            justify="left",
+            wraplength=860,
+        )
+        self._billing_hero_sub_lbl.pack(anchor="w", fill="x", pady=(8, 0))
+
+        def _billing_card(title: str) -> ctk.CTkFrame:
+            shell = ctk.CTkFrame(bill_scroll, fg_color="transparent")
+            shell.pack(fill="x", pady=(0, 14))
+            ctk.CTkLabel(
+                shell,
+                text=title,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                text_color=self._theme_billing_card_title,
+                anchor="w",
+            ).pack(anchor="w", padx=4, pady=(0, 8))
+            card = ctk.CTkFrame(
+                shell,
+                fg_color=self._theme_nav_idle,
+                corner_radius=14,
+                border_width=1,
+                border_color=self._theme_border_subtle,
+            )
+            card.pack(fill="x")
+            inner = ctk.CTkFrame(card, fg_color="transparent")
+            inner.pack(fill="x", padx=18, pady=16)
+            return inner
+
+        def _billing_row(parent: ctk.CTkFrame, label: str, initial: str = "—") -> ctk.CTkLabel:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=6)
+            ctk.CTkLabel(
+                row,
+                text=label,
+                width=210,
+                anchor="w",
+                text_color=self._theme_billing_row_label,
+                font=ctk.CTkFont(size=13),
+            ).pack(side="left", anchor="n")
+            val_lbl = ctk.CTkLabel(
+                row,
+                text=initial,
+                text_color=self._theme_text_heading,
+                anchor="w",
+                justify="left",
+                wraplength=600,
+                font=ctk.CTkFont(size=13),
+            )
+            val_lbl.pack(side="left", fill="x", expand=True)
+            return val_lbl
+
+        acct = _billing_card("Account")
+        self._billing_lbl_email = _billing_row(acct, "Email", "—")
+        self._billing_lbl_cloud_id = _billing_row(acct, "Account ID", "—")
+        row_sync = ctk.CTkFrame(acct, fg_color="transparent")
+        row_sync.pack(fill="x", pady=6)
+        ctk.CTkLabel(
+            row_sync,
+            text="Last updated",
+            width=210,
+            anchor="w",
+            text_color=self._theme_billing_row_label,
+            font=ctk.CTkFont(size=13),
+        ).pack(side="left", anchor="n")
+        self._billing_sync_label = ctk.CTkLabel(
+            row_sync,
+            text="—",
+            text_color=self._theme_text_heading,
+            anchor="w",
+            justify="left",
+            wraplength=600,
+            font=ctk.CTkFont(size=13),
+        )
+        self._billing_sync_label.pack(side="left", fill="x", expand=True)
+
+        plan = _billing_card("Plan")
+        self._billing_lbl_plan = _billing_row(plan, "Current plan", "—")
+        self._billing_lbl_account_since = _billing_row(plan, "Account since", "—")
+        self._billing_lbl_trial_end = _billing_row(plan, "Trial ends", "—")
+        self._billing_lbl_trial_left = _billing_row(plan, "Time remaining", "—")
+
+        hint = ctk.CTkFrame(bill_scroll, fg_color="transparent")
+        hint.pack(fill="x", pady=(4, 10))
+        ctk.CTkLabel(
+            hint,
+            text=(
+                "Your subscription is tied to the Account ID above. Your trial starts when that account "
+                "is created. After paying in the browser, use Refresh status so this app updates right away."
+            ),
+            text_color=self._theme_billing_hint,
+            font=ctk.CTkFont(size=12),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", padx=4)
+
+        bill_btns = ctk.CTkFrame(billing_tab, fg_color="transparent")
+        bill_btns.pack(fill="x", padx=8, pady=(0, 10))
+        self._billing_activate_btn = ctk.CTkButton(
+            bill_btns,
+            text="Open subscription link",
+            width=220,
+            height=42,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=self._theme_accent,
+            hover_color=self._theme_hover,
+            border_width=0,
+            command=self._on_billing_activate_services,
+        )
+        self._billing_activate_btn.pack(side="left", padx=(0, 12))
+        ctk.CTkButton(
+            bill_btns,
+            text="Refresh status",
+            width=150,
+            height=42,
+            fg_color=self._theme_nav_active,
+            hover_color=self._theme_hover,
+            command=self._refresh_billing_panel,
+        ).pack(side="left")
+        self._attach_tooltip(
+            self._billing_activate_btn,
+            "Opens your secure payment page in the browser to subscribe or manage billing.",
+        )
+
+    def _billing_apply_panel_texts_fallback(self) -> None:
+        """Best-effort text when refresh fails (avoids stuck hero / empty-looking rows)."""
+        try:
+            self._billing_hero_title_lbl.configure(text="Subscription status unavailable")
+            self._billing_hero_sub_lbl.configure(
+                text="If this keeps happening, use Refresh status or check the activity log under Settings."
+            )
+        except Exception:
+            pass
+        for attr, txt in (
+            ("_billing_lbl_email", "—"),
+            ("_billing_lbl_cloud_id", "—"),
+            ("_billing_lbl_plan", "—"),
+            ("_billing_lbl_account_since", "—"),
+            ("_billing_lbl_trial_end", "—"),
+            ("_billing_lbl_trial_left", "—"),
+        ):
+            lbl = getattr(self, attr, None)
+            if lbl is not None:
+                try:
+                    lbl.configure(text=txt)
+                except Exception:
+                    pass
+        sync = getattr(self, "_billing_sync_label", None)
+        if sync is not None:
+            try:
+                sync.configure(text="—", text_color=self._theme_billing_hint)
+            except Exception:
+                pass
+
+    def _cancel_billing_poll(self) -> None:
+        jid = getattr(self, "_billing_poll_after", None)
+        if jid is not None:
+            try:
+                self.after_cancel(jid)
+            except Exception:
+                pass
+            self._billing_poll_after = None
+
+    def _schedule_billing_poll(self) -> None:
+        self._cancel_billing_poll()
+
+        def tick() -> None:
+            self._billing_poll_after = None
+            try:
+                if self.tabview.get() != "Billing":
+                    return
+                self._refresh_billing_panel()
+                self._billing_poll_after = self.after(25000, tick)
+            except Exception:
+                logging.getLogger("rootrecord.ui").exception("Billing poll refresh failed")
+
+        self._billing_poll_after = self.after(25000, tick)
+
+    def _sync_footer_license_display(self) -> None:
+        try:
+            from license_client import license_footer_hints
+            from license_config import get_license_api_config
+
+            if not get_license_api_config():
+                pass
+            else:
+                h = license_footer_hints(api_configured=True)
+                if hasattr(self, "_license_banner_var"):
+                    self._license_banner_var.set((h.line or ""))
+                    self._purge_footer_ctk_label_placeholders()
+        except Exception:
+            pass
+
+    def _sync_cloud_tick(self) -> None:
+        """Periodically sync account data when online sign-in is configured and a session exists."""
+        _interval_ms = 60_000
+        try:
+            from license_config import get_license_api_config
+
+            if not get_license_api_config():
+                self.after(_interval_ms, self._sync_cloud_tick)
+                return
+            from sync_engine import sync_cycle_best_effort
+
+            pushed, pulled, applied = sync_cycle_best_effort(self.cfg, local_user_id=self.uid)
+            if pushed or pulled or applied:
+                logging.getLogger("rootrecord.sync").info(
+                    "sync cycle: pushed=%s pulled=%s applied=%s", pushed, pulled, applied
+                )
+        except Exception:
+            logging.getLogger("rootrecord.sync").debug("sync tick", exc_info=True)
+        finally:
+            try:
+                self.after(_interval_ms, self._sync_cloud_tick)
+            except Exception:
+                pass
+
+    def _on_billing_payment_link(self) -> None:
+        from license_config import get_payment_link_url
+
+        email = (settings_get(self.cfg, "license_account_email", "") or "").strip() or (
+            os.environ.get("LICENSE_EMAIL") or ""
+        ).strip()
+        base = get_payment_link_url().strip()
+        if not base.startswith("http"):
+            messagebox.showerror("RootRecord", "Invalid payment link configuration.")
+            return
+        if email:
+            sep = "&" if "?" in base else "?"
+            url = f"{base}{sep}prefilled_email={quote(email)}"
+        else:
+            url = base
+        webbrowser.open(url)
+
+    def _on_billing_activate_services(self) -> None:
+        """Open the Stripe product / payment link immediately (no remote checkout hop)."""
+        email = (settings_get(self.cfg, "license_account_email", "") or "").strip() or (
+            os.environ.get("LICENSE_EMAIL") or ""
+        ).strip()
+        if not email:
+            messagebox.showinfo(
+                "RootRecord",
+                "Set your billing email first (sign-in prompt or Account Settings).",
+            )
+            return
+        self._on_billing_payment_link()
+
+    def _refresh_billing_panel(self) -> None:
+        if getattr(self, "_billing_lbl_email", None) is None:
+            return
+        from license_client import (
+            LICENSE_CLOUD_ACCOUNT_ID_KEY,
+            LicenseConflictError,
+            format_trial_remaining_human,
+            read_cache_file,
+        )
+        from license_config import get_license_api_config
+        from license_runtime import refresh_entitlement_and_apply
+
+        api = get_license_api_config()
+        email = (settings_get(self.cfg, "license_account_email", "") or "").strip() or (
+            os.environ.get("LICENSE_EMAIL") or ""
+        ).strip()
+
+        self._billing_lbl_email.configure(text=email or "Not set")
+
+        fetch_note = ""
+        sync_color = self._theme_billing_row_label
+        if api and email:
+            try:
+                refresh_entitlement_and_apply(self.cfg)
+                fetch_note = "Just now"
+                sync_color = "#5dd39e"
+            except LicenseConflictError as exc:
+                fetch_note = exc.message[:120] if len(exc.message) > 120 else exc.message
+                sync_color = "#e07a7a"
+            except RuntimeError:
+                fetch_note = "Could not update"
+                sync_color = "#e6c35c"
+            except Exception:
+                fetch_note = "Could not update"
+                sync_color = "#e07a7a"
+        elif not api:
+            fetch_note = "—"
+            sync_color = self._theme_billing_hint
+        else:
+            fetch_note = "Add email first"
+            sync_color = "#e6c35c"
+
+        try:
+            self._billing_sync_label.configure(text=fetch_note, text_color=sync_color)
+        except Exception:
+            pass
+
+        raw = read_cache_file() or {}
+        cloud_id = (settings_get(self.cfg, LICENSE_CLOUD_ACCOUNT_ID_KEY, "") or "").strip()
+        if not cloud_id:
+            rid = raw.get("account_id")
+            if isinstance(rid, str) and len(rid.strip()) >= 32:
+                cloud_id = rid.strip()
+                settings_set(self.cfg, LICENSE_CLOUD_ACCOUNT_ID_KEY, cloud_id)
+        try:
+            self._billing_lbl_cloud_id.configure(text=cloud_id or "—")
+        except Exception:
+            pass
+
+        access = str(raw.get("access") or "—")
+        reason = str(raw.get("reason") or "—")
+        trial_end = raw.get("trial_ends_at")
+        trial_start = raw.get("trial_started_at")
+
+        def _fmt_local(iso_val: Any) -> str:
+            if not isinstance(iso_val, str) or not iso_val.strip():
+                return "—"
+            try:
+                return format_stored_utc_as_local(self.cfg, iso_val.strip().replace("Z", "+00:00"))
+            except Exception:
+                return "—"
+
+        def _plan_label() -> str:
+            if access == "full" and reason == "paid":
+                return "Active subscription"
+            if reason == "trialing":
+                return "Free trial"
+            if reason == "past_due":
+                return "Payment required"
+            if reason == "trial_expired":
+                return "Trial ended"
+            if access == "read_only":
+                return "Subscription required"
+            return "—"
+
+        self._billing_lbl_plan.configure(text=_plan_label())
+        self._billing_lbl_account_since.configure(text=_fmt_local(trial_start))
+
+        if isinstance(trial_end, str) and trial_end.strip():
+            self._billing_lbl_trial_end.configure(text=_fmt_local(trial_end))
+            rem = format_trial_remaining_human(trial_end)
+            self._billing_lbl_trial_left.configure(text=rem or "—")
+        else:
+            self._billing_lbl_trial_end.configure(text="—")
+            self._billing_lbl_trial_left.configure(text="—")
+
+        hero = "Subscription"
+        subhero = ""
+
+        if not api:
+            hero = "Not connected"
+            subhero = "This copy is not linked to online subscription checks."
+        elif not email:
+            hero = "Email not set"
+            subhero = "Add your billing email under Account Settings (or sign in when prompted)."
+        elif access == "full" and reason == "paid":
+            hero = "You're subscribed"
+            subhero = ""
+        elif access == "full" and reason == "trialing":
+            rem = format_trial_remaining_human(trial_end if isinstance(trial_end, str) else None)
+            hero = "Free trial"
+            subhero = (
+                "Your trial started when your account was created."
+                + (f" {rem} left." if rem else "")
+            )
+        elif reason == "past_due":
+            hero = "Payment required"
+            subhero = "Update your payment method, then Refresh status."
+        elif access == "read_only" or reason in ("trial_expired",):
+            hero = "Activate to continue"
+            subhero = "Use Open subscription link, complete checkout in the browser, then Refresh status."
+        else:
+            hero = "Subscription"
+            subhero = "Tap Refresh status to update."
+
+        try:
+            self._billing_hero_title_lbl.configure(text=hero)
+            self._billing_hero_sub_lbl.configure(text=subhero)
+        except Exception:
+            pass
+
+        self._sync_footer_license_display()
 
     def _build_calendar(self) -> None:
         t = self.tabview.tab("Work Log")
@@ -4909,7 +6834,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             t,
             text="Day timeline, entry list, summaries, and report exports for the selected range.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
         ).pack(anchor="w", pady=(0, 8))
         self._cal_day = tk.StringVar(value=datetime.now().date().isoformat())
         today = datetime.now().date()
@@ -4934,7 +6859,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkButton(rp, text="Apply custom", command=self._apply_custom_range).grid(row=0, column=4, padx=6)
         ctk.CTkButton(rp, text="Export CSV", command=self._export_report_csv).grid(row=0, column=5, padx=6)
         ctk.CTkButton(rp, text="Export PDF", command=self._export_report_pdf).grid(row=0, column=6, padx=6)
-        hb_rp = ctk.CTkLabel(rp, text="?", width=18, height=18, fg_color="#5d636d", text_color="#f2f4f7", corner_radius=9)
+        hb_rp = ctk.CTkLabel(rp, text="?", width=18, height=18, fg_color=self._theme_help_btn_bg, text_color=self._theme_help_btn_fg, corner_radius=9)
         hb_rp.grid(row=0, column=7, padx=(4, 0), pady=4, sticky="w")
         self._attach_tooltip(
             hb_rp,
@@ -4962,6 +6887,17 @@ class RootRecordApp(ctk.CTk):
 
         self._cal_summary = ctk.CTkTextbox(t, height=120, font=ctk.CTkFont(family="Consolas", size=12))
         self._cal_summary.pack(fill="x", pady=6)
+        ctk.CTkLabel(
+            t,
+            text=(
+                "Entries below are sorted by work start time. ID is assigned when the row is saved, "
+                "so backdated or manual blocks can have a higher ID than work logged later the same day."
+            ),
+            text_color=self._theme_text_muted,
+            font=ctk.CTkFont(size=11),
+            wraplength=920,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
         self._cal_entries = ctk.CTkTextbox(t, height=260, font=ctk.CTkFont(family="Consolas", size=12))
         self._cal_entries.pack(fill="both", expand=True, pady=6)
         self._cal_entries.bind("<ButtonRelease-1>", self._on_calendar_entry_click)
@@ -4998,7 +6934,7 @@ class RootRecordApp(ctk.CTk):
 
         lock_row = ctk.CTkFrame(t, fg_color="transparent")
         lock_row.pack(fill="x", pady=(0, 6))
-        self._lock_status = ctk.CTkLabel(lock_row, text="Range lock: unlocked", text_color="gray")
+        self._lock_status = ctk.CTkLabel(lock_row, text="Range lock: unlocked", text_color=self._theme_text_muted)
         self._lock_status.pack(side="left", padx=4)
         ctk.CTkButton(lock_row, text="Lock selected report range", command=self._lock_selected_report_range).pack(
             side="left", padx=6
@@ -5059,7 +6995,7 @@ class RootRecordApp(ctk.CTk):
             t1 = format_stored_utc_as_local(self.cfg, str(r["end_utc"]))
             self._cal_entries.insert(
                 "end",
-                f"ID {r['id']}  {t0} -> {t1}  "
+                f"{t0} -> {t1}  · ID {int(r['id']):5}  "
                 f"{label:10}  {r['description']}\n",
             )
         self._refresh_lock_status()
@@ -5072,7 +7008,7 @@ class RootRecordApp(ctk.CTk):
             line = self._cal_entries.get(f"{idx} linestart", f"{idx} lineend")
         except Exception:
             return
-        m = re.match(r"\s*ID\s+(\d+)\b", line or "")
+        m = re.search(r"\bID\s+(\d+)\b", line or "")
         if not m:
             return
         rid = int(m.group(1))
@@ -5408,7 +7344,7 @@ class RootRecordApp(ctk.CTk):
                 fig_b = Figure(figsize=(6.6, 3.0), dpi=110)
                 ax_b = fig_b.add_subplot(111)
                 xs = list(range(len(hrs)))
-                ax_b.bar(xs, hrs, color="#1f6aa5")
+                ax_b.bar(xs, hrs, color=self._theme_accent)
                 ax_b.set_xticks(xs)
                 ax_b.set_xticklabels(labels, fontsize=7, rotation=30 if len(labels) > 8 else 0, ha="right")
                 ax_b.set_ylabel("Hours")
@@ -5786,208 +7722,455 @@ class RootRecordApp(ctk.CTk):
         if not rows:
             messagebox.showinfo("RootRecord Business Manager", "No entries loaded for this day.")
             return
-        top = ctk.CTkToplevel(self)
-        top.title("Bulk Edit Entries")
-        self._apply_window_icon(top)
-        top.geometry("980x640")
-        top.transient(self)
-        top.grab_set()
 
-        ctk.CTkLabel(
-            top,
-            text="Select entries, then apply one or more actions at once.",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(anchor="w", padx=12, pady=(10, 6))
+        # Same stack as Check-in: tk.Toplevel + tk widgets. If anything raises before cv.pack(),
+        # only the title line appears — so pack the list shell first, harden row formatting, and surface errors.
+        top: tk.Toplevel | None = None
+        try:
+            m = self._tk_modal_theme()
+            top = tk.Toplevel(self)
+            top.title("Bulk Edit Entries")
+            top.configure(bg=m["root_bg"])
+            self._apply_window_icon(top)
+            top.transient(self)
+            try:
+                top.withdraw()
+            except Exception:
+                pass
 
-        list_frame = ctk.CTkScrollableFrame(top, height=360)
-        list_frame.pack(fill="both", expand=True, padx=10, pady=6)
-        self._bulk_checks: dict[int, tk.IntVar] = {}
-        for r in rows:
-            rid = int(r["id"])
-            v = tk.IntVar(value=0)
-            self._bulk_checks[rid] = v
-            line = (
-                f"ID {rid}  {str(r.get('start_utc', ''))[:16]} -> {str(r.get('end_utc', ''))[:16]}  "
-                f"{(r.get('category_name') or r.get('category') or ''):10}  {r.get('description', '')}"
-            )
-            ctk.CTkCheckBox(list_frame, text=line, variable=v, onvalue=1, offvalue=0).pack(
-                anchor="w", fill="x", padx=6, pady=2
-            )
+            def close_bulk() -> None:
+                self._safe_destroy_window(top)
 
-        action = ctk.CTkFrame(top, fg_color="transparent")
-        action.pack(fill="x", padx=10, pady=10)
-        self._bulk_delete = tk.IntVar(value=0)
-        self._bulk_merge = tk.IntVar(value=0)
-        self._bulk_shift_min = tk.IntVar(value=0)
-        ctk.CTkCheckBox(action, text="Delete selected", variable=self._bulk_delete).pack(side="left", padx=6)
-        ctk.CTkCheckBox(
-            action,
-            text="Merge adjacent selected (same description/category/project)",
-            variable=self._bulk_merge,
-        ).pack(side="left", padx=10)
-        ctk.CTkLabel(action, text="Shift minutes").pack(side="left", padx=(10, 4))
-        ctk.CTkEntry(action, width=80, textvariable=self._bulk_shift_min).pack(side="left", padx=4)
-        ctk.CTkButton(action, text="-15m", width=54, command=lambda: self._bulk_shift_min.set(-15)).pack(side="left", padx=2)
-        ctk.CTkButton(action, text="+15m", width=54, command=lambda: self._bulk_shift_min.set(15)).pack(side="left", padx=2)
+            top.protocol("WM_DELETE_WINDOW", close_bulk)
+            cb_style = self._tk_modal_configure_combobox_style(top, "RRBulkEdit.TCombobox", m)
+            e_kw: dict[str, Any] = {
+                "bg": m["ent_bg"],
+                "fg": m["lbl_fg"],
+                "insertbackground": m["lbl_fg"],
+                "relief": "flat",
+                "font": m["font_entry"],
+                "width": 8,
+                "highlightthickness": 1,
+                "highlightbackground": m["ent_hl"],
+                "highlightcolor": m["ent_hl"],
+            }
 
-        action2 = ctk.CTkFrame(top, fg_color="transparent")
-        action2.pack(fill="x", padx=10, pady=(2, 10))
-        cats = list_work_categories(self.cfg, self.uid)
-        cat_map: dict[str, int | None] = {"(keep current)": None}
-        for c in cats:
-            cat_map[c["name"]] = int(c["id"])
-        prows = list_projects(self.cfg, self.uid)
-        proj_map: dict[str, int | None] = {"(keep current)": None}
-        for p in prows:
-            proj_map[p["name"]] = int(p["id"])
-        self._bulk_cat_map = cat_map
-        self._bulk_proj_map = proj_map
-        ctk.CTkLabel(action2, text="Set category").pack(side="left", padx=(6, 4))
-        self._bulk_cat_cmb = ctk.CTkComboBox(action2, values=list(cat_map.keys()), width=210)
-        self._bulk_cat_cmb.set("(keep current)")
-        self._bulk_cat_cmb.pack(side="left", padx=4)
-        ctk.CTkButton(
-            action2,
-            text="Add",
-            width=52,
-            command=lambda: self._bulk_add_category(cats, cat_map),
-        ).pack(side="left", padx=(2, 10))
-        ctk.CTkLabel(action2, text="Set project").pack(side="left", padx=(14, 4))
-        self._bulk_proj_cmb = ctk.CTkComboBox(action2, values=list(proj_map.keys()), width=210)
-        self._bulk_proj_cmb.set("(keep current)")
-        self._bulk_proj_cmb.pack(side="left", padx=4)
+            body = tk.Frame(top, bg=m["panel_bg"])
+            # Height follows content; avoid stretching to a tall default window (empty band below buttons).
+            body.pack(fill="both", expand=False)
 
-        def apply_bulk() -> None:
-            if self._selected_range_locked():
-                messagebox.showerror("RootRecord Business Manager", "Selected report range is locked.")
-                return
-            selected_ids = [rid for rid, var in self._bulk_checks.items() if var.get() == 1]
-            if not selected_ids:
-                messagebox.showerror("RootRecord Business Manager", "Select at least one entry.")
-                return
-            rows_by_id = {int(r["id"]): r for r in rows}
-            selected_rows = [rows_by_id[rid] for rid in selected_ids if rid in rows_by_id]
-            selected_rows.sort(key=lambda x: str(x.get("start_utc", "")))
-            delete_ids: set[int] = set()
-            changed = 0
+            tk.Label(
+                body,
+                text="Select entries, then apply one or more actions at once.",
+                bg=m["panel_bg"],
+                fg=m["heading"],
+                font=m["font_title"],
+                wraplength=920,
+                justify=tk.LEFT,
+            ).pack(anchor="nw", fill="x", padx=14, pady=(12, 8))
 
-            cat_choice = self._bulk_cat_cmb.get()
-            proj_choice = self._bulk_proj_cmb.get()
-            set_cat = self._bulk_cat_map.get(cat_choice)
-            set_proj = self._bulk_proj_map.get(proj_choice)
-            apply_cat = cat_choice != "(keep current)"
-            apply_proj = proj_choice != "(keep current)"
-            shift_min = int(self._bulk_shift_min.get() or 0)
+            list_host = tk.Frame(body, bg=m["panel_bg"])
+            list_host.pack(fill="x", padx=12, pady=6)
+            list_host.pack_propagate(False)
+            line_px, max_vis = 28, 14
+            host_h = min(380, max(120, min(len(rows), max_vis) * line_px + 12))
+            list_host.configure(height=host_h)
 
-            for r in selected_rows:
+            # Default ttk vertical scrollbar only — custom style names like "*.VScroll" omit the
+            # Vertical.TScrollbar layout on Windows and raise "Layout ... not found".
+            cv = tk.Canvas(list_host, bg=m["ent_bg"], highlightthickness=0, bd=0, height=host_h)
+            inner = tk.Frame(cv, bg=m["ent_bg"])
+            inner_id = cv.create_window((0, 0), window=inner, anchor="nw", width=880)
+
+            def sync_scroll(_e: Any = None) -> None:
+                try:
+                    bb = cv.bbox("all")
+                    if bb is not None:
+                        cv.configure(scrollregion=bb)
+                    w = max(240, int(cv.winfo_width()) - 8)
+                    cv.itemconfigure(inner_id, width=w)
+                except tk.TclError:
+                    pass
+
+            inner.bind("<Configure>", lambda _e: sync_scroll())
+
+            def on_cv_cfg(e: Any) -> None:
+                try:
+                    cv.itemconfigure(inner_id, width=max(240, int(e.width) - 8))
+                except tk.TclError:
+                    pass
+
+            cv.bind("<Configure>", on_cv_cfg)
+
+            def on_wheel(e: Any) -> None:
+                try:
+                    cv.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                except tk.TclError:
+                    pass
+
+            cv.bind("<MouseWheel>", on_wheel)
+            inner.bind("<MouseWheel>", on_wheel)
+
+            sb = ttk.Scrollbar(list_host, orient="vertical", command=cv.yview)
+            cv.configure(yscrollcommand=sb.set)
+            cv.pack(side="left", fill="both", expand=True, padx=(0, 2))
+            sb.pack(side="right", fill="y")
+
+            self._bulk_listbox = None
+            self._bulk_row_checks: list[tuple[int, tk.IntVar]] = []
+            for r in rows:
                 rid = int(r["id"])
-                if rid in delete_ids:
-                    continue
-                if self._bulk_delete.get() == 1:
-                    insert_time_entry_audit(
-                        self.cfg, self.uid, entry_id=rid, action="bulk_delete", old_row=r, new_row=None
-                    )
-                    if delete_time_entry(self.cfg, self.uid, rid):
-                        changed += 1
-                    continue
-                next_start = str(r["start_utc"])
-                next_end = str(r["end_utc"])
-                if shift_min != 0:
-                    try:
-                        next_start = (datetime.fromisoformat(next_start) + timedelta(minutes=shift_min)).isoformat()
-                        next_end = (datetime.fromisoformat(next_end) + timedelta(minutes=shift_min)).isoformat()
-                    except ValueError:
-                        pass
-                if apply_cat or apply_proj:
-                    ok = update_time_entry(
-                        self.cfg,
-                        self.uid,
-                        rid,
-                        start_utc=next_start,
-                        end_utc=next_end,
-                        description=str(r["description"]),
-                        work_category_id=set_cat if apply_cat else r.get("work_category_id"),
-                        project_id=set_proj if apply_proj else r.get("project_id"),
-                    )
-                    if ok:
-                        new_r = dict(r)
-                        new_r["start_utc"] = next_start
-                        new_r["end_utc"] = next_end
-                        new_r["work_category_id"] = set_cat if apply_cat else r.get("work_category_id")
-                        new_r["project_id"] = set_proj if apply_proj else r.get("project_id")
-                        insert_time_entry_audit(
-                            self.cfg, self.uid, entry_id=rid, action="bulk_update", old_row=r, new_row=new_r
-                        )
-                        changed += 1
-                elif shift_min != 0:
-                    ok = update_time_entry(
-                        self.cfg,
-                        self.uid,
-                        rid,
-                        start_utc=next_start,
-                        end_utc=next_end,
-                        description=str(r["description"]),
-                        work_category_id=r.get("work_category_id"),
-                        project_id=r.get("project_id"),
-                    )
-                    if ok:
-                        new_r = dict(r)
-                        new_r["start_utc"] = next_start
-                        new_r["end_utc"] = next_end
-                        insert_time_entry_audit(
-                            self.cfg, self.uid, entry_id=rid, action="bulk_shift", old_row=r, new_row=new_r
-                        )
-                        changed += 1
+                sel = tk.IntVar(master=top, value=0)
+                self._bulk_row_checks.append((rid, sel))
+                cat_raw = r.get("category_name")
+                if cat_raw is None:
+                    cat_raw = r.get("category")
+                cat_disp = str(cat_raw if cat_raw is not None else "").strip()
+                label10 = (cat_disp or "—")[:10]
+                desc_disp = str(r.get("description") or "")
+                line = (
+                    f"ID {rid}  {str(r.get('start_utc', ''))[:16]} -> {str(r.get('end_utc', ''))[:16]}  "
+                    f"{label10:<10}  {desc_disp}"
+                )
+                if len(line) > 260:
+                    line = line[:257] + "..."
+                rf = tk.Frame(inner, bg=m["ent_bg"])
+                rf.pack(fill="x", padx=2, pady=1)
+                tk.Checkbutton(
+                    rf,
+                    variable=sel,
+                    onvalue=1,
+                    offvalue=0,
+                    bg=m["ent_bg"],
+                    fg=m["lbl_fg"],
+                    font=m["font_lbl"],
+                    selectcolor=m["accent"],
+                    activebackground=m["ent_bg"],
+                    activeforeground=m["lbl_fg"],
+                    highlightthickness=0,
+                ).pack(side="left", padx=(6, 4))
+                tk.Label(rf, text=line, anchor="w", bg=m["ent_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+                    side="left", fill="x", expand=True
+                )
 
-            if self._bulk_merge.get() == 1 and self._bulk_delete.get() == 0:
-                i = 0
-                while i < len(selected_rows) - 1:
-                    base = selected_rows[i]
-                    if int(base["id"]) in delete_ids:
-                        i += 1
+            top.after(30, sync_scroll)
+
+            act1 = tk.Frame(body, bg=m["panel_bg"])
+            act1.pack(fill="x", padx=12, pady=(8, 4))
+            self._bulk_delete = tk.IntVar(master=top, value=0)
+            tk.Checkbutton(
+                act1,
+                text="Delete selected",
+                variable=self._bulk_delete,
+                onvalue=1,
+                offvalue=0,
+                bg=m["panel_bg"],
+                fg=m["lbl_fg"],
+                font=m["font_lbl"],
+                selectcolor=m["ent_bg"],
+                activebackground=m["panel_bg"],
+                activeforeground=m["lbl_fg"],
+            ).pack(side="left", padx=6)
+            self._bulk_merge = tk.IntVar(master=top, value=0)
+            tk.Checkbutton(
+                act1,
+                text="Merge adjacent selected (same description/category/project)",
+                variable=self._bulk_merge,
+                onvalue=1,
+                offvalue=0,
+                bg=m["panel_bg"],
+                fg=m["lbl_fg"],
+                font=m["font_lbl"],
+                selectcolor=m["ent_bg"],
+                activebackground=m["panel_bg"],
+                activeforeground=m["lbl_fg"],
+            ).pack(side="left", padx=10)
+            tk.Label(act1, text="Shift minutes", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+                side="left", padx=(10, 4)
+            )
+            self._bulk_shift_min_str = tk.StringVar(master=top, value="0")
+            tk.Entry(act1, textvariable=self._bulk_shift_min_str, **e_kw).pack(side="left", padx=4, ipady=3)
+
+            def bump_shift(delta: int) -> None:
+                try:
+                    cur = int(self._bulk_shift_min_str.get().strip() or "0")
+                except ValueError:
+                    cur = 0
+                self._bulk_shift_min_str.set(str(cur + delta))
+
+            tk.Button(
+                act1,
+                text="-15m",
+                font=m["font_btn"],
+                bg=m["accent"],
+                fg="#ffffff",
+                activebackground=m["accent"],
+                padx=8,
+                pady=4,
+                relief="flat",
+                command=lambda: bump_shift(-15),
+            ).pack(side="left", padx=2)
+            tk.Button(
+                act1,
+                text="+15m",
+                font=m["font_btn"],
+                bg=m["accent"],
+                fg="#ffffff",
+                activebackground=m["accent"],
+                padx=8,
+                pady=4,
+                relief="flat",
+                command=lambda: bump_shift(15),
+            ).pack(side="left", padx=2)
+
+            cat_row = tk.Frame(body, bg=m["panel_bg"])
+            cat_row.pack(fill="x", padx=12, pady=(4, 4))
+            proj_row = tk.Frame(body, bg=m["panel_bg"])
+            proj_row.pack(fill="x", padx=12, pady=(2, 8))
+            cats = list_work_categories(self.cfg, self.uid)
+            cat_map: dict[str, int | None] = {"(keep current)": None}
+            for c in cats:
+                cat_map[c["name"]] = int(c["id"])
+            prows = list_projects(self.cfg, self.uid)
+            proj_map: dict[str, int | None] = {"(keep current)": None}
+            for p in prows:
+                proj_map[p["name"]] = int(p["id"])
+            self._bulk_cat_map = cat_map
+            self._bulk_proj_map = proj_map
+
+            tk.Label(cat_row, text="Set category", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+                side="left", padx=(6, 8)
+            )
+            self._bulk_cat_cmb = ttk.Combobox(
+                cat_row, values=list(cat_map.keys()), width=36, state="readonly", style=cb_style
+            )
+            self._bulk_cat_cmb.set("(keep current)")
+            self._bulk_cat_cmb.pack(side="left", padx=4, fill="x", expand=True)
+            tk.Button(
+                cat_row,
+                text="Add",
+                font=m["font_btn"],
+                bg=m["accent"],
+                fg="#ffffff",
+                activebackground=m["accent"],
+                padx=12,
+                pady=4,
+                relief="flat",
+                command=lambda: self._bulk_add_category(cats, cat_map),
+            ).pack(side="left", padx=6)
+
+            tk.Label(proj_row, text="Set project", bg=m["panel_bg"], fg=m["lbl_fg"], font=m["font_lbl"]).pack(
+                side="left", padx=(6, 8)
+            )
+            self._bulk_proj_cmb = ttk.Combobox(
+                proj_row, values=list(proj_map.keys()), width=44, state="readonly", style=cb_style
+            )
+            self._bulk_proj_cmb.set("(keep current)")
+            self._bulk_proj_cmb.pack(side="left", padx=4, fill="x", expand=True)
+
+            def apply_bulk() -> None:
+                if self._selected_range_locked():
+                    messagebox.showerror("RootRecord Business Manager", "Selected report range is locked.")
+                    return
+                checks = getattr(self, "_bulk_row_checks", None)
+                if not checks:
+                    messagebox.showerror("RootRecord Business Manager", "Entry list is not available.")
+                    return
+                selected_ids = [rid for rid, v in checks if int(v.get() or 0) == 1]
+                if not selected_ids:
+                    messagebox.showerror(
+                        "RootRecord Business Manager",
+                        "Tick at least one entry in the list above, then choose your actions and click Apply.",
+                    )
+                    return
+                rows_by_id = {int(r["id"]): r for r in rows}
+                selected_rows = [rows_by_id[rid] for rid in selected_ids if rid in rows_by_id]
+                selected_rows.sort(key=lambda x: str(x.get("start_utc", "")))
+                delete_ids: set[int] = set()
+                changed = 0
+
+                cat_choice = self._bulk_cat_cmb.get()
+                proj_choice = self._bulk_proj_cmb.get()
+                set_cat = self._bulk_cat_map.get(cat_choice)
+                set_proj = self._bulk_proj_map.get(proj_choice)
+                apply_cat = cat_choice != "(keep current)"
+                apply_proj = proj_choice != "(keep current)"
+                try:
+                    shift_min = int(getattr(self, "_bulk_shift_min_str", None).get().strip() or "0")
+                except (ValueError, AttributeError, tk.TclError):
+                    shift_min = 0
+
+                for r in selected_rows:
+                    rid = int(r["id"])
+                    if rid in delete_ids:
                         continue
-                    j = i + 1
-                    end_utc = str(base["end_utc"])
-                    while j < len(selected_rows):
-                        nxt = selected_rows[j]
-                        if int(nxt["id"]) in delete_ids:
-                            j += 1
-                            continue
-                        contiguous = str(nxt["start_utc"]) == end_utc
-                        same_meta = (
-                            str(nxt.get("description", "")) == str(base.get("description", ""))
-                            and nxt.get("work_category_id") == base.get("work_category_id")
-                            and nxt.get("project_id") == base.get("project_id")
+                    if self._bulk_delete.get() == 1:
+                        insert_time_entry_audit(
+                            self.cfg, self.uid, entry_id=rid, action="bulk_delete", old_row=r, new_row=None
                         )
-                        if not (contiguous and same_meta):
-                            break
-                        end_utc = str(nxt["end_utc"])
-                        delete_ids.add(int(nxt["id"]))
-                        j += 1
-                    if end_utc != str(base["end_utc"]):
+                        if delete_time_entry(self.cfg, self.uid, rid):
+                            changed += 1
+                        continue
+                    next_start = str(r["start_utc"])
+                    next_end = str(r["end_utc"])
+                    if shift_min != 0:
+                        try:
+                            next_start = (datetime.fromisoformat(next_start) + timedelta(minutes=shift_min)).isoformat()
+                            next_end = (datetime.fromisoformat(next_end) + timedelta(minutes=shift_min)).isoformat()
+                        except ValueError:
+                            pass
+                    if apply_cat or apply_proj:
                         ok = update_time_entry(
                             self.cfg,
                             self.uid,
-                            int(base["id"]),
-                            start_utc=str(base["start_utc"]),
-                            end_utc=end_utc,
-                            description=str(base["description"]),
-                            work_category_id=base.get("work_category_id"),
-                            project_id=base.get("project_id"),
+                            rid,
+                            start_utc=next_start,
+                            end_utc=next_end,
+                            description=str(r["description"]),
+                            work_category_id=set_cat if apply_cat else r.get("work_category_id"),
+                            project_id=set_proj if apply_proj else r.get("project_id"),
                         )
                         if ok:
+                            new_r = dict(r)
+                            new_r["start_utc"] = next_start
+                            new_r["end_utc"] = next_end
+                            new_r["work_category_id"] = set_cat if apply_cat else r.get("work_category_id")
+                            new_r["project_id"] = set_proj if apply_proj else r.get("project_id")
+                            insert_time_entry_audit(
+                                self.cfg, self.uid, entry_id=rid, action="bulk_update", old_row=r, new_row=new_r
+                            )
                             changed += 1
-                    i = j
-                for rid in delete_ids:
-                    if delete_time_entry(self.cfg, self.uid, rid):
-                        changed += 1
+                    elif shift_min != 0:
+                        ok = update_time_entry(
+                            self.cfg,
+                            self.uid,
+                            rid,
+                            start_utc=next_start,
+                            end_utc=next_end,
+                            description=str(r["description"]),
+                            work_category_id=r.get("work_category_id"),
+                            project_id=r.get("project_id"),
+                        )
+                        if ok:
+                            new_r = dict(r)
+                            new_r["start_utc"] = next_start
+                            new_r["end_utc"] = next_end
+                            insert_time_entry_audit(
+                                self.cfg, self.uid, entry_id=rid, action="bulk_shift", old_row=r, new_row=new_r
+                            )
+                            changed += 1
 
-            self._refresh_calendar()
-            self._refresh_dashboard()
-            messagebox.showinfo("RootRecord Business Manager", f"Bulk edit complete. Updated {changed} records.")
-            top.destroy()
+                if self._bulk_merge.get() == 1 and self._bulk_delete.get() == 0:
+                    i = 0
+                    while i < len(selected_rows) - 1:
+                        base = selected_rows[i]
+                        if int(base["id"]) in delete_ids:
+                            i += 1
+                            continue
+                        j = i + 1
+                        end_utc = str(base["end_utc"])
+                        while j < len(selected_rows):
+                            nxt = selected_rows[j]
+                            if int(nxt["id"]) in delete_ids:
+                                j += 1
+                                continue
+                            contiguous = str(nxt["start_utc"]) == end_utc
+                            same_meta = (
+                                str(nxt.get("description", "")) == str(base.get("description", ""))
+                                and nxt.get("work_category_id") == base.get("work_category_id")
+                                and nxt.get("project_id") == base.get("project_id")
+                            )
+                            if not (contiguous and same_meta):
+                                break
+                            end_utc = str(nxt["end_utc"])
+                            delete_ids.add(int(nxt["id"]))
+                            j += 1
+                        if end_utc != str(base["end_utc"]):
+                            ok = update_time_entry(
+                                self.cfg,
+                                self.uid,
+                                int(base["id"]),
+                                start_utc=str(base["start_utc"]),
+                                end_utc=end_utc,
+                                description=str(base["description"]),
+                                work_category_id=base.get("work_category_id"),
+                                project_id=base.get("project_id"),
+                            )
+                            if ok:
+                                changed += 1
+                        i = j
+                    for rid in delete_ids:
+                        if delete_time_entry(self.cfg, self.uid, rid):
+                            changed += 1
 
-        ctk.CTkButton(top, text="Apply Bulk Edit", command=apply_bulk).pack(anchor="e", padx=12, pady=(0, 12))
+                self._refresh_calendar()
+                self._refresh_dashboard()
+                messagebox.showinfo("RootRecord Business Manager", f"Bulk edit complete. Updated {changed} records.")
+                close_bulk()
+
+            btn_bar = tk.Frame(body, bg=m["panel_bg"])
+            btn_bar.pack(fill="x", padx=14, pady=(4, 14))
+            tk.Button(
+                btn_bar,
+                text="Cancel",
+                font=m["font_btn"],
+                bg="#4a4a4a",
+                fg="#f0f0f0",
+                activebackground="#3d3d3d",
+                relief="flat",
+                padx=22,
+                pady=10,
+                command=close_bulk,
+            ).pack(side="right")
+            tk.Button(
+                btn_bar,
+                text="Apply Bulk Edit",
+                font=("Segoe UI", 13, "bold"),
+                bg=m["accent"],
+                fg="#f8f8f8",
+                activebackground=m["accent"],
+                activeforeground="#ffffff",
+                relief="flat",
+                padx=22,
+                pady=10,
+                command=apply_bulk,
+            ).pack(side="right", padx=(0, 12))
+
+            try:
+                top.update_idletasks()
+                win_w = max(920, min(1280, top.winfo_reqwidth()))
+                win_h = max(340, min(900, top.winfo_reqheight()))
+                if win_h < 280:
+                    win_h = max(340, min(900, 72 + host_h + 260))
+                top.geometry(f"{win_w}x{win_h}")
+                top.minsize(720, 320)
+                try:
+                    top.deiconify()
+                except Exception:
+                    pass
+                top.lift()
+                top.focus_force()
+            except Exception:
+                pass
+            try:
+                top.grab_set()
+            except Exception:
+                pass
+
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            if top is not None:
+                try:
+                    self._safe_destroy_window(top)
+                except Exception:
+                    pass
+            messagebox.showerror(
+                "RootRecord Business Manager",
+                f"Bulk Edit could not open:\n\n{exc!s}",
+            )
+            return
 
     def _bulk_add_category(self, cats: list[dict], cat_map: dict[str, int | None]) -> None:
         name = self._ask_text_dialog(
@@ -6008,7 +8191,7 @@ class RootRecordApp(ctk.CTk):
         for c in refreshed:
             cat_map[c["name"]] = int(c["id"])
         self._bulk_cat_map = cat_map
-        self._bulk_cat_cmb.configure(values=list(cat_map.keys()))
+        self._combo_apply_values(self._bulk_cat_cmb, list(cat_map.keys()))
         self._bulk_cat_cmb.set(clean)
 
     def _build_about(self) -> None:
@@ -6029,7 +8212,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             head,
             text=f"Version {APP_VERSION}",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", pady=(0, 6))
 
@@ -6087,27 +8270,10 @@ class RootRecordApp(ctk.CTk):
             text="Contact",
             command=lambda: webbrowser.open("https://rootrecord.info/contact"),
         ).pack(side="left", padx=4)
+        ctk.CTkButton(row, text="Check for updates", command=self._manual_check_for_updates).pack(side="left", padx=4)
 
         # Right-side About panel graphic.
-        self._about_image_ctk = None
-        about_img_candidates: list[Path] = []
-        if getattr(sys, "frozen", False):
-            about_img_candidates.append(Path(sys.executable).resolve().parent / "about page grahic.jpg")
-        about_img_candidates.append(Path(__file__).resolve().parent / "about page grahic.jpg")
-        about_img_candidates.append(Path(__file__).resolve().parents[2] / "about page grahic.jpg")
-        img_path = next((p for p in about_img_candidates if p.is_file()), None)
-        if img_path is not None:
-            try:
-                from PIL import Image
-
-                pil = Image.open(img_path).convert("RGB")
-                # Match content area proportions for cleaner alignment with the text panel.
-                self._about_image_ctk = ctk.CTkImage(light_image=pil, dark_image=pil, size=(420, 420))
-                ctk.CTkLabel(right, text="", image=self._about_image_ctk).pack(fill="both", expand=True)
-            except Exception:
-                ctk.CTkLabel(right, text="About image could not be loaded.", text_color="gray").pack(
-                    anchor="n", pady=12
-                )
+        self._pack_about_side_image(right)
 
     def _build_plugins(self) -> None:
         t = self.tabview.tab("Plugins")
@@ -6127,7 +8293,7 @@ class RootRecordApp(ctk.CTk):
             text=(
                 "Plugins are published at rootrecord.info/plugins. Installed plugins appear on this page."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             wraplength=820,
             justify="left",
         ).pack(anchor="w", pady=(0, 10))
@@ -6179,7 +8345,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             tab,
             text="Live EcoFlow telemetry trends from Power Monitoring snapshots.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             wraplength=820,
             justify="left",
         ).pack(anchor="w", pady=(0, 8))
@@ -6191,7 +8357,7 @@ class RootRecordApp(ctk.CTk):
             width=140,
             command=self._refresh_energy_management,
         ).pack(side="left")
-        self._energy_status = ctk.CTkLabel(controls, text="", text_color="gray")
+        self._energy_status = ctk.CTkLabel(controls, text="", text_color=self._theme_text_muted)
         self._energy_status.pack(side="left", padx=(12, 0))
         self._energy_tabs = ctk.CTkTabview(tab)
         self._energy_tabs.pack(fill="both", expand=True, pady=(4, 4))
@@ -6463,13 +8629,13 @@ class RootRecordApp(ctk.CTk):
             ctk.CTkLabel(
                 row,
                 text=f"ID: {pid}  |  Version: {plugin['version']}  |  Source: {plugin.get('source', 'builtin')}",
-                text_color="gray",
+                text_color=self._theme_text_muted,
                 font=ctk.CTkFont(size=11),
             ).pack(anchor="w", padx=10)
             ctk.CTkLabel(
                 row,
                 text=plugin["desc"],
-                text_color="gray",
+                text_color=self._theme_text_muted,
                 wraplength=760,
                 justify="left",
             ).pack(anchor="w", padx=10, pady=(2, 6))
@@ -6547,13 +8713,13 @@ class RootRecordApp(ctk.CTk):
             ("Poll interval", "__fixed_poll__"),
         ]
         for i, (label, key) in enumerate(fields):
-            ctk.CTkLabel(frm, text=label, text_color="gray").grid(row=i, column=0, sticky="w", padx=(0, 8), pady=2)
+            ctk.CTkLabel(frm, text=label, text_color=self._theme_text_muted).grid(row=i, column=0, sticky="w", padx=(0, 8), pady=2)
             if key == "__fixed_api_url__":
-                ctk.CTkLabel(frm, text="https://api.ecoflow.com", text_color="gray").grid(
+                ctk.CTkLabel(frm, text="https://api.ecoflow.com", text_color=self._theme_text_muted).grid(
                     row=i, column=1, sticky="w", pady=2
                 )
             elif key == "__fixed_poll__":
-                ctk.CTkLabel(frm, text="5 seconds (fixed)", text_color="gray").grid(
+                ctk.CTkLabel(frm, text="5 seconds (fixed)", text_color=self._theme_text_muted).grid(
                     row=i, column=1, sticky="w", pady=2
                 )
             elif key == "device_serials":
@@ -6585,7 +8751,7 @@ class RootRecordApp(ctk.CTk):
             )
             if latest.get("error_text"):
                 last_line += f" ({str(latest.get('error_text'))[:80]})"
-            ctk.CTkLabel(frm, text=last_line, text_color="gray", wraplength=760, justify="left").grid(
+            ctk.CTkLabel(frm, text=last_line, text_color=self._theme_text_muted, wraplength=760, justify="left").grid(
                 row=len(fields), column=0, columnspan=2, sticky="w", pady=(4, 0)
             )
         self._plugin_forms[plugin_id] = {"vars": vars_s}
@@ -6635,7 +8801,7 @@ class RootRecordApp(ctk.CTk):
             ("Quiet end (HH:MM)", "quiet_end"),
         ]
         for i, (label, key) in enumerate(fields):
-            ctk.CTkLabel(frm, text=label, text_color="gray").grid(row=i, column=0, sticky="w", padx=(0, 8), pady=2)
+            ctk.CTkLabel(frm, text=label, text_color=self._theme_text_muted).grid(row=i, column=0, sticky="w", padx=(0, 8), pady=2)
             ctk.CTkEntry(frm, textvariable=vars_s[key], width=220).grid(row=i, column=1, sticky="ew", pady=2)
 
         action_row = ctk.CTkFrame(frm, fg_color="transparent")
@@ -6651,7 +8817,7 @@ class RootRecordApp(ctk.CTk):
                 dist = r.get("distance_miles")
                 place = str(r.get("place") or "")
                 lines.append(f"- {when} | M{mag if mag is not None else '?'} | {dist:.1f}mi | {place}" if isinstance(dist, (int, float)) else f"- {when} | M{mag if mag is not None else '?'} | {place}")
-            ctk.CTkLabel(frm, text="\n".join(lines), text_color="gray", wraplength=760, justify="left").grid(
+            ctk.CTkLabel(frm, text="\n".join(lines), text_color=self._theme_text_muted, wraplength=760, justify="left").grid(
                 row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(3, 0)
             )
         self._plugin_forms[plugin_id] = {"vars": vars_s}
@@ -6716,6 +8882,11 @@ class RootRecordApp(ctk.CTk):
                 self._set_notify_debt_settlement.select()
             else:
                 self._set_notify_debt_settlement.deselect()
+        if getattr(self, "_set_cloud_backup", None):
+            if bool(settings_get(self.cfg, "cloud_backup_enabled", False)):
+                self._set_cloud_backup.select()
+            else:
+                self._set_cloud_backup.deselect()
         if not bool(settings_get(self.cfg, "show_process_status_banner_enabled", True)):
             self._clear_process_status()
         self._refresh_help_bubbles_visibility()
@@ -6916,7 +9087,7 @@ class RootRecordApp(ctk.CTk):
                 "Everything the app ships with: default app_settings, category seeds, quick-action seeds. "
                 "“Yours” is what is stored now; open sections below to edit or add rows."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -6929,7 +9100,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             scroll,
             text=f"Installed version: {APP_VERSION}",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
         ).pack(anchor="w", pady=(0, 16))
 
@@ -6942,7 +9113,7 @@ class RootRecordApp(ctk.CTk):
                 "Factory defaults: hourly 0¢, prompt every 900s after 120s delay, no-response action none / 45s timeout, "
                 "money on dashboard on, timed popup topmost off. See the reference panel above for exact values."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -6971,7 +9142,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             scroll,
             text="Timed check-in popups run only while actively working. They pause during breaks and when clocked out.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -7041,6 +9212,19 @@ class RootRecordApp(ctk.CTk):
         self._add_help_bubble(
             row_help_bubbles,
             "Toggle all '?' contextual help bubbles across the app.",
+        )
+        row_github_upd = ctk.CTkFrame(scroll, fg_color="transparent")
+        row_github_upd.pack(anchor="w", pady=(0, 6))
+        self._set_github_update_check = ctk.CTkSwitch(
+            row_github_upd,
+            text="Check GitHub for new installer releases on startup",
+        )
+        if settings_get(self.cfg, "github_update_check_enabled", True):
+            self._set_github_update_check.select()
+        self._set_github_update_check.pack(side="left")
+        self._add_help_bubble(
+            row_github_upd,
+            "Compares this app's version to the latest release on GitHub and offers a download link when a newer installer is published.",
         )
         row_auto_sched = ctk.CTkFrame(scroll, fg_color="transparent")
         row_auto_sched.pack(anchor="w", pady=(0, 6))
@@ -7141,6 +9325,7 @@ class RootRecordApp(ctk.CTk):
                 settings_set(self.cfg, "multi_business_enabled", multi_enabled)
                 settings_set(self.cfg, "currency_safe_summaries_enabled", self._set_currency_safe.get() == 1)
                 settings_set(self.cfg, "help_bubbles_enabled", self._set_help_bubbles.get() == 1)
+                settings_set(self.cfg, "github_update_check_enabled", self._set_github_update_check.get() == 1)
                 settings_set(self.cfg, "auto_post_scheduled_expenses_enabled", self._set_auto_sched_expenses.get() == 1)
                 settings_set(
                     self.cfg,
@@ -7187,7 +9372,7 @@ class RootRecordApp(ctk.CTk):
                 "Your database rows (live). Full shipped category list is in the reference panel at the top. "
                 "These names also appear on the Time tab and in prompts."
             ),
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -7255,7 +9440,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             scroll,
             text="Factory default: no projects. Your current projects:",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -7289,7 +9474,7 @@ class RootRecordApp(ctk.CTk):
         ctk.CTkLabel(
             scroll,
             text="Factory seeds (Code / Review / Meeting) are listed at the top; below is what is stored for you now.",
-            text_color="gray",
+            text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
             wraplength=640,
             justify="left",
@@ -7347,25 +9532,398 @@ def _restart_rootrecord_app() -> None:
     os._exit(0)
 
 
-def _data_footer_line(cfg: DbConfig) -> str:
-    return f"Data: {cfg.db_path}  ·  Workspace: {workspace_root()}"
+def _startup_splash_image_candidates() -> list[Path]:
+    """Prefer build/branding/Loading.* (installer art); fall back to About graphic, then favicon."""
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path) -> None:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(p)
+
+    for p in iter_loading_image_paths():
+        add(p)
+    ap = resolve_shipped_asset(
+        "about_page_graphic.jpg",
+        "about page grahic.jpg",
+        "about page graphic.jpg",
+    )
+    if ap is not None:
+        add(ap)
+    for d in iter_app_bundle_asset_dirs():
+        add(d / "favicon.ico")
+    return candidates
+
+
+def _attach_startup_splash_spinner(root: Any, parent: Any, pal: BrandingPalette) -> None:
+    """Small rotating arc + 'Loading...' (tk event loop must run via update / main pump)."""
+    import tkinter as tk
+
+    bg = pal.bg
+    row = tk.Frame(parent, bg=bg)
+    row.pack(pady=(14, 0))
+    sz = 28
+    pad = 2
+    accent = pal.accent
+    cv = tk.Canvas(
+        row,
+        width=sz,
+        height=sz,
+        bg=bg,
+        highlightthickness=0,
+        bd=0,
+    )
+    cv.pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(
+        row,
+        text="Loading...",
+        fg=pal.splash_label,
+        bg=bg,
+        font=("Segoe UI", 11),
+    ).pack(side=tk.LEFT)
+    angle = [0]
+
+    def draw() -> None:
+        cv.delete("all")
+        a = angle[0] % 360
+        cv.create_arc(
+            pad,
+            pad,
+            sz - pad,
+            sz - pad,
+            start=a,
+            extent=270,
+            style=tk.ARC,
+            outline=accent,
+            width=3,
+        )
+        angle[0] = (angle[0] + 10) % 360
+
+    spin_job: list[str | None] = [None]
+
+    def tick() -> None:
+        try:
+            if not root.winfo_exists() or not cv.winfo_exists():
+                return
+        except Exception:
+            return
+        draw()
+        spin_job[0] = root.after(48, tick)
+
+    def on_destroy(_evt: Any = None) -> None:
+        j = spin_job[0]
+        if j is not None:
+            try:
+                root.after_cancel(j)
+            except Exception:
+                pass
+            spin_job[0] = None
+
+    draw()
+    spin_job[0] = root.after(48, tick)
+    try:
+        root.bind("<Destroy>", on_destroy, add="+")
+    except Exception:
+        pass
+
+
+def _show_startup_splash_screen() -> Any | None:
+    """Small borderless window with branding while the main UI loads."""
+    import tkinter as tk
+
+    pal = get_branding_palette()
+    root = tk.Tk()
+    root.configure(bg=pal.bg)
+    root.overrideredirect(True)
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    outer = tk.Frame(root, bg=pal.bg, padx=22, pady=18)
+    outer.pack()
+    root._splash_outer_frame = outer  # noqa: SLF001 — cancel row + used by startup pump
+    photo_keep: list[Any] = []
+    img_path: Path | None = None
+    for p in _startup_splash_image_candidates():
+        if p.is_file():
+            img_path = p
+            break
+    placed = False
+    if img_path is not None:
+        try:
+            from PIL import Image, ImageTk
+
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS  # type: ignore[attr-defined]
+            pil = Image.open(img_path)
+            if pil.mode == "P" and "transparency" in getattr(pil, "info", {}):
+                pil = pil.convert("RGBA")
+            br, bgc, bb = pal.bg_rgb()
+            if pil.mode == "RGBA":
+                bg = Image.new("RGB", pil.size, (br, bgc, bb))
+                bg.paste(pil, mask=pil.split()[3])
+                pil = bg
+            else:
+                pil = pil.convert("RGB")
+            pil.thumbnail((300, 220), resample)
+            ph = ImageTk.PhotoImage(pil)
+            photo_keep.append(ph)
+            tk.Label(outer, image=ph, bg=pal.bg).pack()
+            placed = True
+        except Exception:
+            placed = False
+    if not placed:
+        tk.Label(
+            outer,
+            text="RootRecord",
+            fg=pal.text_heading,
+            bg=pal.bg,
+            font=("Segoe UI", 18, "bold"),
+        ).pack()
+    _attach_startup_splash_spinner(root, outer, pal)
+    root._splash_photo_keep = photo_keep  # noqa: SLF001 — keep PhotoImage refs alive
+    root.update_idletasks()
+    ww = max(root.winfo_reqwidth(), 280)
+    wh = root.winfo_reqheight()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = max(0, (sw - ww) // 2)
+    y = max(0, (sh - wh) // 3)
+    root.geometry(f"{ww}x{wh}+{x}+{y}")
+    root.update()
+    return root
+
+
+def _resize_splash_to_fit_content(splash: Any) -> None:
+    """Recompute splash bounds after adding widgets (avoids clipping Cancel below a fixed height)."""
+    try:
+        splash.update_idletasks()
+        ww = max(int(splash.winfo_reqwidth()), 300)
+        wh = max(int(splash.winfo_reqheight()), 120)
+        sw = int(splash.winfo_screenwidth())
+        sh = int(splash.winfo_screenheight())
+        x = max(0, (sw - ww) // 2)
+        y = max(0, (sh - wh) // 3)
+        splash.geometry(f"{ww}x{wh}+{x}+{y}")
+        splash.update_idletasks()
+    except Exception:
+        pass
+
+
+def _add_startup_splash_cancel_immediate(splash: Any, cancel_event: threading.Event) -> None:
+    """Always show Cancel on the splash so startup can be aborted without waiting on a timer."""
+    import tkinter as tk
+
+    if getattr(splash, "_splash_cancel_immediate_added", False):
+        return
+    pal = get_branding_palette()
+    bg = pal.bg
+    outer = getattr(splash, "_splash_outer_frame", None)
+    if outer is None:
+        return
+    row = tk.Frame(outer, bg=bg)
+    row.pack(pady=(12, 0))
+    splash._splash_cancel_immediate_added = True  # noqa: SLF001
+    splash._splash_cancel_row = row  # noqa: SLF001
+
+    def on_cancel() -> None:
+        cancel_event.set()
+        try:
+            for w in row.winfo_children():
+                if isinstance(w, tk.Button):
+                    w.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        # Hard exit: cooperative cancel can miss cases (e.g. nested Tk / blocking dialogs).
+        os._exit(0)
+
+    tk.Label(
+        row,
+        text="Starting… (database or network may take a moment)",
+        fg=pal.splash_label,
+        bg=bg,
+        font=("Segoe UI", 9),
+    ).pack()
+    tk.Button(
+        row,
+        text="Cancel",
+        command=on_cancel,
+        font=("Segoe UI", 10),
+    ).pack(pady=(6, 0))
+    _resize_splash_to_fit_content(splash)
+    try:
+        splash.update()
+    except Exception:
+        pass
+
+
+def _schedule_startup_splash_stuck_hint(splash: Any, delay_ms: int = 12_000) -> None:
+    """If startup is still showing, add a short hint (Cancel is already visible)."""
+    import tkinter as tk
+
+    pal = get_branding_palette()
+    bg = pal.bg
+
+    def add_hint() -> None:
+        try:
+            if not splash.winfo_exists():
+                return
+        except Exception:
+            return
+        if getattr(splash, "_splash_stuck_hint", None) is not None:
+            return
+        outer = getattr(splash, "_splash_outer_frame", None)
+        if outer is None or not outer.winfo_exists():
+            return
+        hint = tk.Label(
+            outer,
+            text="Still waiting? Use Cancel to quit if something is stuck.",
+            fg=pal.splash_label,
+            bg=bg,
+            font=("Segoe UI", 8),
+        )
+        hint.pack(pady=(6, 0))
+        splash._splash_stuck_hint = hint  # noqa: SLF001
+        _resize_splash_to_fit_content(splash)
+        try:
+            splash.update()
+        except Exception:
+            pass
+
+    try:
+        splash.after(delay_ms, add_hint)
+    except Exception:
+        pass
+
+
+def _startup_load_database_phase(splash: Any | None, cancel_event: threading.Event) -> DbConfig:
+    """Run DB init on a worker thread so the main thread can pump the splash and honor Cancel."""
+    from license_client import LicenseStartupCancelled
+
+    cfg_out: list[DbConfig] = []
+    err_out: list[Exception] = []
+
+    def work() -> None:
+        try:
+            c = load_db_config()
+            maybe_migrate_legacy_desktop_db()
+            ensure_schema(c)
+            migrate_registered_users_from_json(c, registered_users_file())
+            run_migrations(c, local_user_id=LOCAL_USER_ID)
+            bootstrap(c)
+            cfg_out.append(c)
+        except Exception as exc:  # noqa: BLE001
+            err_out.append(exc)
+
+    t = threading.Thread(target=work, daemon=True, name="rootrecord-startup-db")
+    t.start()
+    while t.is_alive():
+        if cancel_event.is_set():
+            raise LicenseStartupCancelled()
+        if splash is not None:
+            try:
+                splash.update_idletasks()
+                splash.update()
+            except Exception:
+                pass
+        time.sleep(0.02)
+    t.join(timeout=5.0)
+    if err_out:
+        raise err_out[0]
+    if not cfg_out:
+        raise RuntimeError("Database startup did not complete.")
+    return cfg_out[0]
 
 
 def run_app() -> None:
-    cfg = load_db_config()
-    maybe_migrate_legacy_desktop_db()
-    try:
-        ensure_schema(cfg)
-        migrate_registered_users_from_json(cfg, registered_users_file())
-        run_migrations(cfg, local_user_id=LOCAL_USER_ID)
-    except OSError as exc:
-        messagebox.showerror("RootRecord Business Manager", f"Database init failed:\n{exc}")
-        raise SystemExit(1) from exc
-    bootstrap(cfg)
+    from single_instance import ensure_single_instance_or_exit
 
+    ensure_single_instance_or_exit()
+
+    log = logging.getLogger("rootrecord.startup")
+    splash: Any | None = None
+    try:
+        splash = _show_startup_splash_screen()
+    except Exception:
+        log.debug("Startup splash failed to load", exc_info=True)
+        splash = None
+
+    from license_client import LicenseStartupCancelled
     from license_runtime import apply_license_at_startup
 
-    apply_license_at_startup(cfg)
+    cancel_event = threading.Event()
 
-    app = RootRecordApp(cfg)
-    app.mainloop()
+    def _pump_startup_splash() -> None:
+        if splash is None:
+            return
+        try:
+            splash.update_idletasks()
+            splash.update()
+        except Exception:
+            pass
+
+    if splash is not None:
+        _add_startup_splash_cancel_immediate(splash, cancel_event)
+        _schedule_startup_splash_stuck_hint(splash)
+
+    try:
+        cfg = _startup_load_database_phase(splash, cancel_event)
+    except LicenseStartupCancelled:
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+        log.info("Startup cancelled from splash during database preparation")
+        raise SystemExit(0)
+    except OSError as exc:
+        log.exception("Database init failed")
+        messagebox.showerror("RootRecord Business Manager", f"Database init failed:\n{exc}")
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+        raise SystemExit(1) from exc
+    except Exception as exc:
+        log.exception("Database init failed")
+        messagebox.showerror("RootRecord Business Manager", f"Database init failed:\n{exc}")
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+        raise SystemExit(1) from exc
+
+    try:
+        apply_license_at_startup(
+            cfg,
+            ui_pump=_pump_startup_splash if splash is not None else None,
+            cancel_check=(lambda: cancel_event.is_set()) if splash is not None else None,
+            ui_master=splash,
+        )
+    except LicenseStartupCancelled:
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+        log.info("Startup cancelled from splash while waiting for license server")
+        raise SystemExit(0)
+
+    app: RootRecordApp | None = None
+    try:
+        app = RootRecordApp(cfg, startup_splash=splash)
+    finally:
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+    if app is not None:
+        app.mainloop()

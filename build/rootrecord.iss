@@ -7,20 +7,22 @@
 ;
 ; --- Trust / "Windows protected your PC" (SmartScreen) ---
 ; Unsigned installers show "Unknown publisher". That is normal for new builds until you use a
-; code signing certificate (Authenticode). Fix: sign RootRecord.exe and the installer .exe with
-; signtool (Windows SDK). EV certificates often get immediate SmartScreen trust; standard (OV)
-; certs build reputation as users run the app. See sign_release.example.ps1 in this folder.
+; code signing certificate (Authenticode). Fix: sign RootRecordBusinessManager.exe and the installer .exe with
+; signtool (Windows SDK). For Azure Artifact Signing use sign_release_azure.ps1 (+ metadata JSON).
+; EV certificates often get immediate SmartScreen trust; standard (OV) certs build reputation.
+; Classic PFX flow: sign_release.example.ps1 in this folder.
 ; Inno can also sign the installer via Sign Tool integration: https://jrsoftware.org/ishelp/topic_setup_signtool.htm
 
-; Display name includes Beta. Install dir may differ from older builds — TryGetExistingInstallDir checks legacy paths.
-#define MyAppName "RootRecord Business Manager (Beta)"
-#define MyAppDirName "Root Record\RootRecord Business Manager (Beta)"
-#define MyAppVersion "1.3.25"
+; GA display name. Canonical install/data-relative folder: RootRecord\Business Manager (no "Root Record\RootRecord..." duplication).
+#define MyAppName "RootRecord Business Manager"
+#define MyAppDirName "RootRecord\Business Manager"
+#define MyPfRelDir "RootRecord\Business Manager"
+#define MyAppVersion "1.3.39"
 #define MyAppPublisher "RootRecord"
 #define MyAppCopyright "Copyright (C) 2026 RootRecord"
 #define MyAppId "{{A7B2E9F1-4C3D-5E6F-8091-2B3C4D5E6F70}"
-#define MyAppExeName "RootRecord.exe"
-#define DistDir "..\\dist\\RootRecord"
+#define MyAppExeName "RootRecordBusinessManager.exe"
+#define DistDir "..\\dist\\RootRecordBusinessManager"
 #define MyAppInstallerIcon "..\\..\\..\\favicon.ico"
 ; Installer side art: Inno expects 164x314 (large) and 55x55 (small) — see build/branding/
 #define MyWizardLargeBmp "branding\\wizard-large.bmp"
@@ -33,11 +35,11 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppCopyright={#MyAppCopyright}
 AppVerName={#MyAppName} {#MyAppVersion}
-; Per-machine install (admin): installs under Program Files
-DefaultDirName={autopf}\Root Record\Business Manager (Beta)
+; Per-machine install (admin): Program Files\RootRecord\Business Manager
+DefaultDirName={autopf}\{#MyPfRelDir}
 DefaultGroupName={#MyAppName}
 OutputDir=.\output
-OutputBaseFilename=RootRecordSetup-Beta-{#MyAppVersion}
+OutputBaseFilename=RootRecordSetup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=classic
@@ -55,6 +57,10 @@ DisableDirPage=auto
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[InstallDelete]
+; Renamed entry binary (was RootRecord.exe); remove leftover on upgrade.
+Type: files; Name: "{app}\RootRecord.exe"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -121,12 +127,16 @@ function TryGetExistingInstallDir(out Dir: string): Boolean;
 var
   KeyPath: string;
   UninstallCmd: string;
-  Legacy1: string;
-  Legacy2: string;
-  Legacy3: string;
-  Legacy4: string;
-  Legacy5: string;
-  Legacy6: string;
+  PfCanonical: string;
+  PfGA1: string;
+  PfGA2: string;
+  PfBeta1: string;
+  PfBeta2: string;
+  LaNew: string;
+  LaMid: string;
+  LaFlat: string;
+  LaBetaFlat: string;
+  LaBetaNested: string;
 begin
   Result := False;
   Dir := '';
@@ -176,40 +186,64 @@ begin
   { Portable / broken registry / older folder layouts (same AppId or copied tree) }
   if not Result then
   begin
-    Legacy5 := ExpandConstant('{autopf}\Root Record\Business Manager (Beta)');
-    Legacy6 := ExpandConstant('{autopf}\Root Record\RootRecord Business Manager (Beta)');
-    Legacy1 := ExpandConstant('{localappdata}\{#MyAppDirName}');
-    Legacy2 := ExpandConstant('{localappdata}\Root Record\RootRecord Business Manager');
-    Legacy3 := ExpandConstant('{localappdata}\RootRecord Business Manager');
-    Legacy4 := ExpandConstant('{localappdata}\RootRecord Business Manager (Beta)');
-    if DirHasOurExe(Legacy5) then
+    PfCanonical := ExpandConstant('{autopf}\{#MyPfRelDir}');
+    PfGA1 := ExpandConstant('{autopf}\Root Record\Business Manager');
+    PfGA2 := ExpandConstant('{autopf}\Root Record\RootRecord Business Manager');
+    PfBeta1 := ExpandConstant('{autopf}\Root Record\Business Manager (Beta)');
+    PfBeta2 := ExpandConstant('{autopf}\Root Record\RootRecord Business Manager (Beta)');
+    LaNew := ExpandConstant('{localappdata}\{#MyAppDirName}');
+    LaMid := ExpandConstant('{localappdata}\Root Record\RootRecord Business Manager');
+    LaFlat := ExpandConstant('{localappdata}\RootRecord Business Manager');
+    LaBetaFlat := ExpandConstant('{localappdata}\RootRecord Business Manager (Beta)');
+    LaBetaNested := ExpandConstant('{localappdata}\Root Record\RootRecord Business Manager (Beta)');
+    if DirHasOurExe(PfCanonical) then
     begin
-      Dir := Legacy5;
+      Dir := PfCanonical;
       Result := True;
     end
-    else if DirHasOurExe(Legacy6) then
+    else if DirHasOurExe(PfGA1) then
     begin
-      Dir := Legacy6;
+      Dir := PfGA1;
       Result := True;
     end
-    else if DirHasOurExe(Legacy1) then
+    else if DirHasOurExe(PfGA2) then
     begin
-      Dir := Legacy1;
+      Dir := PfGA2;
       Result := True;
     end
-    else if DirHasOurExe(Legacy2) then
+    else if DirHasOurExe(PfBeta1) then
     begin
-      Dir := Legacy2;
+      Dir := PfBeta1;
       Result := True;
     end
-    else if DirHasOurExe(Legacy3) then
+    else if DirHasOurExe(PfBeta2) then
     begin
-      Dir := Legacy3;
+      Dir := PfBeta2;
       Result := True;
     end
-    else if DirHasOurExe(Legacy4) then
+    else if DirHasOurExe(LaBetaNested) then
     begin
-      Dir := Legacy4;
+      Dir := LaBetaNested;
+      Result := True;
+    end
+    else if DirHasOurExe(LaNew) then
+    begin
+      Dir := LaNew;
+      Result := True;
+    end
+    else if DirHasOurExe(LaMid) then
+    begin
+      Dir := LaMid;
+      Result := True;
+    end
+    else if DirHasOurExe(LaFlat) then
+    begin
+      Dir := LaFlat;
+      Result := True;
+    end
+    else if DirHasOurExe(LaBetaFlat) then
+    begin
+      Dir := LaBetaFlat;
       Result := True;
     end;
   end;
@@ -429,7 +463,13 @@ begin
   begin
     if Trim(ExistingUninstallCmd) <> '' then
     begin
-      if DirHasOurExe(ExpandConstant('{autopf}\Root Record\Business Manager (Beta)')) then
+      if DirHasOurExe(ExpandConstant('{autopf}\{#MyPfRelDir}')) then
+        ExistingInstallDir := ExpandConstant('{autopf}\{#MyPfRelDir}')
+      else if DirHasOurExe(ExpandConstant('{autopf}\Root Record\Business Manager')) then
+        ExistingInstallDir := ExpandConstant('{autopf}\Root Record\Business Manager')
+      else if DirHasOurExe(ExpandConstant('{autopf}\Root Record\RootRecord Business Manager')) then
+        ExistingInstallDir := ExpandConstant('{autopf}\Root Record\RootRecord Business Manager')
+      else if DirHasOurExe(ExpandConstant('{autopf}\Root Record\Business Manager (Beta)')) then
         ExistingInstallDir := ExpandConstant('{autopf}\Root Record\Business Manager (Beta)')
       else if DirHasOurExe(ExpandConstant('{autopf}\Root Record\RootRecord Business Manager (Beta)')) then
         ExistingInstallDir := ExpandConstant('{autopf}\Root Record\RootRecord Business Manager (Beta)');
@@ -822,7 +862,7 @@ begin
     begin
       MsgBox(
         'Could not uninstall the previous version automatically. ' +
-        'Please close RootRecord and uninstall the old version, then run setup again.',
+        'Please close RootRecord Business Manager and uninstall the old version, then run setup again.',
         mbError,
         MB_OK
       );
@@ -854,11 +894,13 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DeleteData: Integer;
   DataRoot: string;
+  AppDir: string;
 begin
+  if Pos('/KEEPDATA', Uppercase(GetCmdTail())) > 0 then
+    Exit;
+  AppDir := ExpandConstant('{app}');
   if CurUninstallStep = usUninstall then
   begin
-    if Pos('/KEEPDATA', Uppercase(GetCmdTail())) > 0 then
-      Exit;
     DataRoot := '';
     RegQueryStringValue(HKCU, 'Environment', 'ROOTRECORD_HOME', DataRoot);
     DataRoot := Trim(DataRoot);
@@ -868,7 +910,8 @@ begin
       MsgBox(
         'Do you also want to delete user data and directories?' + #13#10 + #13#10 +
         'This includes tracked data under:' + #13#10 +
-        DataRoot,
+        DataRoot + #13#10 + #13#10 +
+        'The application folder under Program Files will always be removed after uninstall.',
         mbConfirmation,
         MB_YESNO
       );
@@ -877,8 +920,28 @@ begin
       if DirExists(DataRoot) then
         DelTree(DataRoot, True, True, True);
       RegDeleteValue(HKCU, 'Environment', 'ROOTRECORD_HOME');
-      if DirExists(ExpandConstant('{app}')) then
-        DelTree(ExpandConstant('{app}'), True, True, True);
     end;
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    { Remove the install directory tree (files are removed by Inno; this clears leftovers and empty folders). }
+    if DirExists(AppDir) then
+      DelTree(AppDir, True, True, True);
   end;
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  { Close running instances so uninstall can replace or remove files. }
+  Result := True;
+  Exec(
+    ExpandConstant('{cmd}'),
+    '/C taskkill /F /IM {#MyAppExeName} /T >nul 2>&1',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+  Sleep(800);
 end;

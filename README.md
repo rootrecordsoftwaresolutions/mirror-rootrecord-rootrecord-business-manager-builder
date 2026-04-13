@@ -1,5 +1,15 @@
 # RootRecord Business Manager — private builder repository
 
+## End-user documentation
+
+For **customers, evaluators, and buyers**, the product overview (features, privacy, system requirements, FAQ, support links) lives in **[`docs/PRODUCT_README.md`](docs/PRODUCT_README.md)**. This root README stays focused on building and maintaining the app.
+
+To refresh the **customer-facing GitHub repo** (README + images in git; Windows installer only on **Releases**), run **`build\sync_public_github_docs.ps1`**, then commit and push from **`rootrecord-business-manager-download`** next to this package. Site: **https://github.com/RootRecord/rootrecord-business-manager-download** — publish the current-version installer with **`build\publish_product_release.ps1`** (uses `build\output\RootRecordSetup-<APP_VERSION>.exe` only).
+
+The slug **`rootrecord-business-manager`** redirects to the private builder repo on this org, so the product page uses **`rootrecord-business-manager-download`** instead.
+
+---
+
 **Audience:** internal (you). This is maintainer documentation for source, **Windows** and **Linux** builds, and releases—not polished end-user help.
 
 **Repository purpose:** This GitHub repo (`rootrecord-business-manager-builder`) holds **source code and build tooling**. It is **private**. Built artifacts (`dist/`, PyInstaller work dirs, Windows installers under `build/output/`) are **not** committed. What you ship publicly is normally:
@@ -29,14 +39,14 @@
 
 ## What the product is
 
-**RootRecord Business Manager (Beta)** is a Python desktop application using **CustomTkinter**. It covers time tracking, money/clients/inventory-style workflows, reporting (ReportLab, Matplotlib), **local SQLite** storage, optional plugins (e.g. power monitoring, USGS earthquake), and system tray behavior (`pystray`). **Cloud sign-in, Firebase, Stripe/trial gating, and in-app GitHub update checks are not part of this codebase**—ship licensing or distribution however you want outside the app.
+**RootRecord Business Manager** is a Python desktop application using **CustomTkinter**. It covers time tracking, money/clients/inventory-style workflows, reporting (ReportLab, Matplotlib), **local SQLite** storage, optional plugins (e.g. power monitoring, USGS earthquake), and system tray behavior (`pystray`). **Optional subscription checks** use a small **remote license API** over HTTPS plus **Stripe** payment links—configure `LICENSE_API_BASE_URL` / `LICENSE_API_SECRET` in `.env` if you use that flow. There is **no** in-app GitHub updater and **no** bundled cloud identity provider; the app is local-first with optional licensing over HTTPS.
 
 The main UI and logic live largely in `ui_main.py`, with data access in `data_api.py`, `db.py`, `storage.py`, migrations in `migrations.py`, and domain rules in `tracking_core.py`, `suite_data.py`, etc.
 
 **Entry points**
 
 - **Development:** `python desktop_app.py` → `ui_main.run_app()`.
-- **Packaged:** PyInstaller outputs a one-folder bundle; the runnable is `RootRecord.exe` (Windows) or `RootRecord` (Linux).
+- **Packaged:** PyInstaller outputs a one-folder bundle; the runnable is `RootRecordBusinessManager.exe` (Windows) or `RootRecordBusinessManager` (Linux).
 
 ---
 
@@ -65,7 +75,9 @@ Dependencies: `requirements.txt` (runtime) and `requirements-build.txt` (PyInsta
 
 Development mode (not frozen) resolves workspace paths from `paths.py` as documented there.
 
-**Backups:** Database backups are **local** (see Program Settings → backup folder). There is no cloud sync in-app.
+**Logs:** `data/logs/rootrecord.log` under the same app data tree (see `log_config.py`) — warnings/errors from startup and license checks; useful when debugging.
+
+**Backups:** Database backups are **local** by default (Program Settings → backup folder). **Optional:** Account Settings can turn on a **secure online copy** of each new backup; the app handles connection details internally (operator notes in `cloudflare/README.md` if you ship your own online services).
 
 ---
 
@@ -73,7 +85,8 @@ Development mode (not frozen) resolves workspace paths from `paths.py` as docume
 
 | Path | Purpose |
 |------|---------|
-| `desktop_app.py` | Loads env, launches UI |
+| `desktop_app.py` | Loads env, logging, launches UI |
+| `log_config.py` | File logging under `data/logs/` |
 | `ui_main.py` | Main window and most features |
 | `app_version.py` | **`APP_VERSION`** — single source for shipped version in-app |
 | `paths.py` | App data roots, `ROOTRECORD_HOME` |
@@ -128,6 +141,14 @@ python desktop_app.py
 
 PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is generated from `app_version.py` on Windows only.
 
+### Release history (builder)
+
+**1.3.39**
+
+- **Windows signing:** `Build RootRecord.bat` runs **Azure Trusted Signing** by default (`build\sign_release_azure.ps1` + `artifact_signing_metadata.json`, gitignored—copy from `artifact_signing_metadata.sample.json`). The **app exe is signed before Inno** so Authenticode is **inside** the installer; the **installer .exe** is signed after compile. Use **`Build RootRecord.bat nosign`** for unsigned local builds.
+- **Build reliability:** `build_windows.ps1` renames aside a locked `dist\RootRecordBusinessManager` tree before PyInstaller, checks Python exit code, and calls the sign script with real parameters (not string splats).
+- **Cursor / locks:** `.cursorignore` excludes `dist/` so the IDE is less likely to hold file handles during rebuilds.
+
 ---
 
 ## Building — Windows (primary)
@@ -141,18 +162,22 @@ PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is gen
 
 From repo root:
 
-- **`Build RootRecord.bat`**, or  
-- PowerShell:
+- **`Build RootRecord.bat`** — default: **PyInstaller + Inno + Azure code signing** (needs `build\artifact_signing_metadata.json` and signing tools; stops running app images before build/sign).  
+- **`Build RootRecord.bat nosign`** — same build **without** Azure signing (faster local iteration).
+- Or from PowerShell:
 
 ```powershell
 cd "…\Root Record Business Manager\build"
-.\build_windows.ps1
+.\build_windows.ps1              # build + installer only
+.\build_windows.ps1 -Sign -StopRunningApp   # same as default .bat (sign app, then Inno, then sign installer)
 ```
 
 This:
 
-1. Runs **PyInstaller** (`build_rootrecord.spec`) → `dist\RootRecord\` (gitignored).
-2. Runs **Inno** on `build\rootrecord.iss` → **`build\output\`**, typically `RootRecordSetup-Beta-<version>.exe`.
+1. Runs **PyInstaller** (`build_rootrecord.spec`) → `dist\RootRecordBusinessManager\` (gitignored).
+2. When **`-Sign`**: signs `dist\…\RootRecordBusinessManager.exe`, then runs **Inno** so the **signed** exe is what gets packaged.
+3. Runs **Inno** on `build\rootrecord.iss` → **`build\output\`**, typically `RootRecordSetup-<version>.exe`.
+4. When **`-Sign`**: signs the installer `.exe` in `build\output\`.
 
 If the output `.exe` is locked (Explorer preview), the script may retry with another filename—read the log.
 
@@ -168,7 +193,7 @@ Requires Windows SDK (`makeappx.exe`). See script and `build/msix/` templates.
 ### Windows: what to ship
 
 - **End users:** the **Inno installer** `.exe` from `build\output\`.
-- The raw `dist\RootRecord\` folder is optional (portable-style); not required if you only publish the installer.
+- The raw `dist\RootRecordBusinessManager\` folder is optional (portable-style); not required if you only publish the installer.
 
 ---
 
@@ -196,10 +221,10 @@ bash build/build_linux.sh
 Run:
 
 ```bash
-./dist/RootRecord/RootRecord
+./dist/RootRecordBusinessManager/RootRecordBusinessManager
 ```
 
-Keep the **entire** `dist/RootRecord/` directory together (shared libs and `_internal`).
+Keep the **entire** `dist/RootRecordBusinessManager/` directory together (shared libs and `_internal`).
 
 ### Continuous integration
 
@@ -211,7 +236,7 @@ This confirms **build reproducibility on a clean Ubuntu image**, not product QA.
 
 ### Linux: what to ship
 
-- Distribute **`RootRecord-linux-x64.tar.gz`** (or zip) with short instructions: extract, run `./RootRecord/RootRecord`, install `python3-tk` (or equivalent) if Tk is missing.
+- Distribute **`RootRecord-linux-x64.tar.gz`** (or zip) with short instructions: extract, run `./RootRecordBusinessManager/RootRecordBusinessManager`, install `python3-tk` (or equivalent) if Tk is missing.
 - Set expectations: **“Best effort; limited testing”** in public release notes unless you have done real desktop validation.
 
 ### Linux: known gaps / risks
@@ -229,7 +254,7 @@ This confirms **build reproducibility on a clean Ubuntu image**, not product QA.
 
 1. Install **GitHub CLI** (`winget install GitHub.cli` on Windows).
 2. `gh auth login` (HTTPS; `repo` scope for private repos).
-3. Build with `build_windows.ps1` so `build\output\RootRecordSetup-Beta-<version>.exe` exists.
+3. Build with `build_windows.ps1` so `build\output\RootRecordSetup-<version>.exe` exists.
 4. Publish:
 
 ```powershell
@@ -275,6 +300,7 @@ Keeping version parity: use the **same tag** for both files; CI and local Linux 
 | Symptom | What to check |
 |--------|----------------|
 | PyInstaller fails | Delete `build/build_rootrecord/` and `dist/`, reinstall deps, rerun. |
+| PyInstaller `WinError 32` on `dist\…\exe` | Close Explorer on `dist\`, reload Cursor after `.cursorignore` includes `dist/`, or run the build from a plain **cmd** window outside the IDE. |
 | Inno Error 32 / locked file | Close Explorer preview of the output exe; use fallback name from log. |
 | Wrong version in Properties | Rebuild after editing `app_version.py`; spec embeds version on Windows. |
 
@@ -306,11 +332,11 @@ Keeping version parity: use the **same tag** for both files; CI and local Linux 
 
 | Name | Meaning |
 |------|---------|
-| **RootRecord Business Manager (Beta)** | Product name (`APP_DISPLAY_NAME` in `app_version.py`) |
+| **RootRecord Business Manager** | Product name (`APP_DISPLAY_NAME` in `app_version.py`) |
 | **rootrecord-business-manager-builder** | This **private** GitHub repo |
-| **RootRecord.exe** | Windows PyInstaller entry binary |
+| **RootRecordBusinessManager.exe** | Windows PyInstaller entry binary |
 | **RootRecord** | Linux PyInstaller entry binary (same role) |
-| **RootRecordSetup-Beta-&lt;version&gt;.exe** | Windows Inno installer for end users |
+| **RootRecordSetup-&lt;version&gt;.exe** | Windows Inno installer for end users |
 | **RootRecord-linux-x64.tar.gz** | CI-produced Linux folder bundle (mostly untested) |
 
 ---

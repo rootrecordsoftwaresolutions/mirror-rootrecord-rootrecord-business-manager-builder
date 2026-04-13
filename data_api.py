@@ -123,7 +123,7 @@ def _time_entry_clips_by_task(
             FROM rr_time_entries t
             LEFT JOIN work_categories c ON c.id = t.work_category_id
             WHERE t.user_id = ? AND t.start_utc < ? AND t.end_utc > ? {extra_biz}
-            ORDER BY t.start_utc ASC
+            ORDER BY t.start_utc ASC, t.id ASC
             """.format(extra_biz=extra_biz),
             (user_id, window_end_utc, window_start_utc, *extra_biz_params),
         )
@@ -987,6 +987,12 @@ def insert_expense(
             ),
         )
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return int(cur.lastrowid)
     finally:
         conn.close()
@@ -1511,6 +1517,12 @@ def insert_income(
             ),
         )
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return int(cur.lastrowid)
     finally:
         conn.close()
@@ -1670,6 +1682,17 @@ def money_totals_by_currency_between(
         conn.close()
 
 
+def ledger_net_totals_by_currency(cfg: DbConfig, user_id: int) -> dict[str, dict[str, int]]:
+    """
+    Cumulative income minus expenses per currency (all recorded history, business scope).
+    Used when no separate cash/bank accounts are configured so the dashboard can still
+    reflect ledger activity.
+    """
+    return money_totals_by_currency_between(
+        cfg, user_id, "1970-01-01T00:00:00", "2100-12-31T23:59:59"
+    )
+
+
 def list_time_entries_between(
     cfg: DbConfig,
     user_id: int,
@@ -1687,7 +1710,7 @@ def list_time_entries_between(
             LEFT JOIN work_categories c ON c.id = t.work_category_id
             LEFT JOIN projects p ON p.id = t.project_id
             WHERE t.user_id = ? AND t.start_utc < ? AND t.end_utc > ? {extra_biz}
-            ORDER BY t.start_utc ASC
+            ORDER BY t.start_utc ASC, t.id ASC
             """.format(extra_biz=extra_biz),
             (user_id, end_utc, start_utc, *extra_biz_params),
         )
@@ -1793,6 +1816,12 @@ def update_time_entry(
             (start, end, description, work_category_id, project_id, entry_id, user_id),
         )
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return cur.rowcount > 0
     finally:
         conn.close()
@@ -1803,6 +1832,12 @@ def delete_time_entry(cfg: DbConfig, user_id: int, entry_id: int) -> bool:
     try:
         cur = conn.execute("DELETE FROM rr_time_entries WHERE id = ? AND user_id = ?", (entry_id, user_id))
         conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
         return cur.rowcount > 0
     finally:
         conn.close()
@@ -2045,7 +2080,7 @@ def recent_time_entries(cfg: DbConfig, user_id: int, limit: int = 15) -> list[di
             FROM rr_time_entries t
             LEFT JOIN work_categories c ON c.id = t.work_category_id
             WHERE t.user_id = ?
-            ORDER BY t.start_utc DESC
+            ORDER BY t.start_utc DESC, t.id DESC
             LIMIT ?
             """,
             (user_id, limit),

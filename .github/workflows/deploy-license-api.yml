@@ -5,8 +5,8 @@
 #     Custom token permissions: Account → Workers Scripts → Edit; Account → D1 → Edit.
 #     Steps: cloudflare/README.md → "Create CLOUDFLARE_API_TOKEN"
 #   account_id is in cloudflare/wrangler.toml (no separate ACCOUNT_ID secret).
-# Optional:
-#   LICENSE_API_SECRET     — If set, synced to Worker as LICENSE_API_SECRET on each deploy (Bearer token for /v1/entitlement)
+# Strongly recommended:
+#   LICENSE_API_SECRET     — Synced to Worker via wrangler secret put. Required at runtime for POST /v1/entitlement and /v1/billing/checkout (503 if missing on Worker).
 #
 # Commit a real D1 database_id in cloudflare/wrangler.toml (create DB once in Cloudflare dashboard → D1 → copy ID).
 
@@ -17,7 +17,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "cloudflare/**"
+      - "cloudflare/wrangler.toml"
+      - "cloudflare/package.json"
+      - "cloudflare/tsconfig.json"
+      - "cloudflare/src/**"
       - ".github/workflows/deploy-license-api.yml"
 
 concurrency:
@@ -52,14 +55,14 @@ jobs:
           workingDirectory: cloudflare
           command: d1 migrations apply rootrecord_license --remote
 
-      - name: Put LICENSE_API_SECRET (optional)
+      - name: Put LICENSE_API_SECRET
         working-directory: cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           LICENSE_API_SECRET: ${{ secrets.LICENSE_API_SECRET }}
         run: |
           if [ -z "${LICENSE_API_SECRET:-}" ]; then
-            echo "LICENSE_API_SECRET not set — skipping wrangler secret put"
+            echo "::warning::LICENSE_API_SECRET GitHub secret not set — Worker v1 routes will return 503 until you run: wrangler secret put LICENSE_API_SECRET"
             exit 0
           fi
           printf '%s' "$LICENSE_API_SECRET" | npx wrangler secret put LICENSE_API_SECRET

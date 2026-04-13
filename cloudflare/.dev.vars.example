@@ -1,3 +1,6 @@
-# Optional: only for `npm run dev` (local wrangler). Not required for cloud deploy.
+# Local `wrangler dev`: required for POST /v1/entitlement and /v1/billing/checkout (matches app .env).
 # Production: `wrangler secret put LICENSE_API_SECRET`
 LICENSE_API_SECRET=change-me-to-a-long-random-string
+
+# Optional: restrict browser CORS to one origin (default *).
+# CORS_ALLOW_ORIGIN=https://example.com
