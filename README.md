@@ -4,7 +4,9 @@
 
 For **customers, evaluators, and buyers**, the product overview (features, privacy, system requirements, FAQ, support links) lives in **[`docs/PRODUCT_README.md`](docs/PRODUCT_README.md)**. This root README stays focused on building and maintaining the app.
 
-To refresh the **customer-facing GitHub repo** (README + images in git; Windows installer only on **Releases**), run **`build\sync_public_github_docs.ps1`**, then commit and push from **`rootrecord-business-manager-download`** next to this package. Site: **https://github.com/RootRecord/rootrecord-business-manager-download** — publish the current-version installer with **`build\publish_product_release.ps1`** (uses `build\output\RootRecordSetup-<APP_VERSION>.exe` only).
+To publish **both** GitHub targets in one go (private **builder**: `main` + tag + source release; public **download**: sync `docs/PRODUCT_README.md` into the download clone, `git push`, **signed** PyInstaller/Inno build, installer release), run **`build\Publish-Dual-Releases.bat`** (defaults to **`-Sign`**; use **`-NoSign`** only for local test publishes). See **`build\publish_dual_releases.ps1`** for `-SkipBuild` and skip-if-tag-exists switches.
+
+To refresh the **customer-facing GitHub repo** only (README + images in git; Windows installer only on **Releases**), run **`build\sync_public_github_docs.ps1`**, then commit and push from **`rootrecord-business-manager-download`** (nested under this tree or next to this package, wherever your `.git` clone lives). Site: **https://github.com/RootRecord/rootrecord-business-manager-download** — publish the current-version installer with **`build\publish_product_release.ps1`** (uses `build\output\RootRecordSetup-<APP_VERSION>.exe` only).
 
 The slug **`rootrecord-business-manager`** redirects to the private builder repo on this org, so the product page uses **`rootrecord-business-manager-download`** instead.
 
@@ -185,6 +187,7 @@ From repo root:
 
 - **`Build RootRecord.bat`** — default: **PyInstaller + Inno + Azure code signing** (needs `build\artifact_signing_metadata.json` and signing tools; stops running app images before build/sign).  
 - **`Build RootRecord.bat nosign`** — same build **without** Azure signing (faster local iteration).
+- **`build\build_windows.cmd`** — same defaults as `build_rootrecord.bat` (**`-Sign -StopRunningApp`**); **`nosign`** as first argument skips signing.
 - Or from PowerShell:
 
 ```powershell
@@ -203,6 +206,10 @@ This:
 If the output `.exe` is locked (Explorer preview), the script may retry with another filename—read the log.
 
 ### MSIX (optional, Windows)
+
+Double-click **`Build RootRecord MSIX.bat`** at the repo root to run a **signed** `build_windows.ps1` pass, then **`build\build_msix.ps1`** (packages the signed `dist\` tree).
+
+Or from PowerShell only (expects `dist\` already built, ideally signed):
 
 ```powershell
 cd "…\Root Record Business Manager\build"
