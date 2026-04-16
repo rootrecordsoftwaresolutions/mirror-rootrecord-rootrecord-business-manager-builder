@@ -47,7 +47,7 @@ function Read-AppVersion([string] $appVersionPyPath) {
 
 function Get-DownloadRepoRoot([string] $packageRoot) {
     $resolvedPkg = (Resolve-Path -LiteralPath $packageRoot).Path
-    $parent = Split-Path -LiteralPath $resolvedPkg -Parent
+    $parent = Split-Path -Path $resolvedPkg -Parent
     $candidates = @(
         (Join-Path $resolvedPkg "rootrecord-business-manager-download"),
         (Join-Path $parent "rootrecord-business-manager-download")
@@ -179,7 +179,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "sync_public_github_docs.ps1 failed."
 }
 
-$devRoot = Split-Path -LiteralPath $pkgRoot -Parent
+$devRoot = Split-Path -Path $pkgRoot -Parent
 $syncOutRoot = Join-Path $devRoot "rootrecord-business-manager-download"
 $downloadRoot = Get-DownloadRepoRoot $pkgRoot
 if (-not (Test-Path -LiteralPath $syncOutRoot)) {
