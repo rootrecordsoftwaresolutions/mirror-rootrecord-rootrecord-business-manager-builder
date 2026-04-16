@@ -4,9 +4,9 @@ Offline-first sync: local SQLite is authoritative for UX; the remote service hol
 - Push: `sync_outbox` → POST /v1/sync/push (session Bearer).
 - Pull: GET /v1/sync/pull → apply remote events idempotently (skip same device + already applied).
 
-Call `notify_data_changed` after local writes so pending rows flush soon; only entity types with
-both enqueue + apply handlers participate (today: session activity). Full-database snapshots use
-the separate online backup path in the desktop app.
+Call `notify_data_changed` after local writes so pending rows flush soon; entity types with enqueue + apply
+handlers: `session_activity`, `time_entry` (stable `client_uuid` on `rr_time_entries`, migration v19).
+Full-database snapshots use the separate online backup path in the desktop app.
 """
 
 from __future__ import annotations
@@ -92,7 +92,11 @@ def apply_pulled_events(
     except Exception:
         my_device = ""
 
-    from db import insert_session_event
+    from db import (
+        delete_time_entry_by_client_uuid_for_sync,
+        insert_session_event,
+        upsert_time_entry_from_remote_sync_payload,
+    )
 
     applied = 0
     for raw in events[:_MAX_PULL]:
@@ -124,6 +128,29 @@ def apply_pulled_events(
                 insert_session_event(cfg, int(local_user_id), et, detail, skip_sync_enqueue=True)
             except Exception:
                 log.debug("apply session_activity failed", exc_info=True)
+                continue
+            _mark_mutation_applied(cfg, cmid, "applied")
+            applied += 1
+        elif entity == "time_entry" and op == "delete":
+            cu = str(payload.get("client_uuid") or "").strip()
+            if not cu:
+                _mark_mutation_applied(cfg, cmid, "skipped_bad_payload")
+                continue
+            try:
+                delete_time_entry_by_client_uuid_for_sync(cfg, int(local_user_id), cu)
+            except Exception:
+                log.debug("apply time_entry delete failed", exc_info=True)
+                continue
+            _mark_mutation_applied(cfg, cmid, "applied")
+            applied += 1
+        elif entity == "time_entry" and op != "delete":
+            try:
+                ok = upsert_time_entry_from_remote_sync_payload(cfg, int(local_user_id), payload)
+            except Exception:
+                log.debug("apply time_entry upsert failed", exc_info=True)
+                ok = False
+            if not ok:
+                _mark_mutation_applied(cfg, cmid, "skipped_apply_failed")
                 continue
             _mark_mutation_applied(cfg, cmid, "applied")
             applied += 1
@@ -186,6 +213,66 @@ def enqueue_session_activity(cfg: DbConfig, user_id: int, event_type: str, detai
         f"{event_type}:{detail[:120]}",
         "upsert",
         {"event_type": event_type, "detail": detail[:4000]},
+    )
+
+
+def _time_entry_payload_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    cu = str(row.get("client_uuid") or "").strip()
+    tag_ids = row.get("tag_ids")
+    if not isinstance(tag_ids, list):
+        tag_ids = []
+    return {
+        "client_uuid": cu,
+        "machine_session_id": row.get("machine_session_id"),
+        "start_utc": str(row.get("start_utc") or ""),
+        "end_utc": str(row.get("end_utc") or ""),
+        "category": str(row.get("category") or "work"),
+        "description": str(row.get("description") or ""),
+        "created_at": str(row.get("created_at") or ""),
+        "work_category_id": row.get("work_category_id"),
+        "project_id": row.get("project_id"),
+        "notes": row.get("notes"),
+        "billable": row.get("billable"),
+        "hourly_rate_cents": row.get("hourly_rate_cents"),
+        "amount_cents": row.get("amount_cents"),
+        "currency": str(row.get("currency") or "USD"),
+        "business_id": row.get("business_id"),
+        "tag_ids": tag_ids,
+    }
+
+
+def enqueue_time_entry_snapshot_by_id(cfg: DbConfig, user_id: int, entry_id: int) -> None:
+    """Queue a full time row for cross-device sync (requires `client_uuid` on the row)."""
+    from db import fetch_time_entry_for_sync
+
+    row = fetch_time_entry_for_sync(cfg, int(user_id), int(entry_id))
+    if not row:
+        return
+    payload = _time_entry_payload_from_row(row)
+    cu = str(payload.get("client_uuid") or "").strip()
+    if not cu:
+        return
+    enqueue_mutation(
+        cfg,
+        int(user_id),
+        "time_entry",
+        f"time_entry:{cu}",
+        "upsert",
+        payload,
+    )
+
+
+def enqueue_time_entry_delete_by_client_uuid(cfg: DbConfig, user_id: int, client_uuid: str) -> None:
+    cu = (client_uuid or "").strip()
+    if not cu:
+        return
+    enqueue_mutation(
+        cfg,
+        int(user_id),
+        "time_entry",
+        f"time_entry:{cu}",
+        "delete",
+        {"client_uuid": cu},
     )
 
 

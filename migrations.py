@@ -883,6 +883,32 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    """Stable per-row UUID for cross-device time entry sync (Worker / mobile companion)."""
+    import uuid as _uuid
+
+    if not _has_column(conn, "rr_time_entries", "client_uuid"):
+        conn.execute("ALTER TABLE rr_time_entries ADD COLUMN client_uuid TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rr_time_entries_user_client_uuid
+          ON rr_time_entries (user_id, client_uuid)
+          WHERE client_uuid IS NOT NULL AND length(trim(client_uuid)) > 0
+        """
+    )
+    rows = conn.execute(
+        """
+        SELECT id FROM rr_time_entries
+        WHERE client_uuid IS NULL OR trim(client_uuid) = ''
+        """
+    ).fetchall()
+    for (rid,) in rows:
+        conn.execute(
+            "UPDATE rr_time_entries SET client_uuid = ? WHERE id = ?",
+            (str(_uuid.uuid4()), int(rid)),
+        )
+
+
 def _migrate_v16(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -1033,6 +1059,12 @@ def run_migrations(cfg: "DbConfig", *, local_user_id: int = 1) -> None:
             _migrate_v18(conn)
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (18, ?)",
+                (now_utc_iso_text(),),
+            )
+        if 19 not in done:
+            _migrate_v19(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (19, ?)",
                 (now_utc_iso_text(),),
             )
         conn.commit()

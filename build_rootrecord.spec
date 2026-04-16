@@ -54,6 +54,13 @@ _default_about_png = os.path.join(spec_dir, "assets", "about_panel_default.png")
 default_about_datas = (
     [(_default_about_png, "assets")] if os.path.isfile(_default_about_png) else []
 )
+_docs_assets = os.path.join(spec_dir, "docs", "assets")
+_docs_assets_datas: list[tuple[str, str]] = []
+if os.path.isdir(_docs_assets):
+    for _fn in os.listdir(_docs_assets):
+        _fp = os.path.join(_docs_assets, _fn)
+        if os.path.isfile(_fp):
+            _docs_assets_datas.append((_fp, os.path.join("docs", "assets")))
 
 
 def _app_version_tuple_and_string() -> tuple[tuple[int, int, int, int], str]:
@@ -120,7 +127,13 @@ a = Analysis(
     [os.path.join(spec_dir, "desktop_app.py")],
     pathex=[spec_dir],
     binaries=ctk_bins + mpl_bins,
-    datas=ctk_datas + mpl_datas + icon_datas + about_datas + loading_datas + default_about_datas,
+    datas=ctk_datas
+    + mpl_datas
+    + icon_datas
+    + about_datas
+    + loading_datas
+    + default_about_datas
+    + _docs_assets_datas,
     hiddenimports=list(
         {
             *ctk_hidden,

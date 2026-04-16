@@ -21,7 +21,7 @@
 #define MyAppName "RootRecord Business Manager"
 #define MyAppDirName "RootRecord\Business Manager"
 #define MyPfRelDir "RootRecord\Business Manager"
-#define MyAppVersion "1.3.43"
+#define MyAppVersion "1.3.45"
 #define MyAppPublisher "Root Record"
 #define MyAppCopyright "Copyright (C) 2026 RootRecord"
 #define MyAppId "{{A7B2E9F1-4C3D-5E6F-8091-2B3C4D5E6F70}"

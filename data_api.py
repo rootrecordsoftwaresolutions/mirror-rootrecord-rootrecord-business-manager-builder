@@ -1705,7 +1705,8 @@ def list_time_entries_between(
         cur = conn.execute(
             """
             SELECT t.id, t.start_utc, t.end_utc, t.description, t.category, t.work_category_id, t.project_id,
-                   t.billable, t.hourly_rate_cents, t.amount_cents, c.name AS category_name, p.name AS project_name
+                   t.billable, t.hourly_rate_cents, t.amount_cents, t.client_uuid,
+                   c.name AS category_name, p.name AS project_name
             FROM rr_time_entries t
             LEFT JOIN work_categories c ON c.id = t.work_category_id
             LEFT JOIN projects p ON p.id = t.project_id
@@ -1713,6 +1714,30 @@ def list_time_entries_between(
             ORDER BY t.start_utc ASC, t.id ASC
             """.format(extra_biz=extra_biz),
             (user_id, end_utc, start_utc, *extra_biz_params),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_session_events_between(
+    cfg: DbConfig,
+    user_id: int,
+    start_utc: str,
+    end_utc: str,
+) -> list[dict[str, Any]]:
+    """Clock in/out, breaks, and other session markers for the Work Log (by `created_at_utc`)."""
+    conn = connect(cfg)
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, event_type, detail, created_at_utc
+            FROM rr_session_events
+            WHERE user_id = ? AND created_at_utc >= ? AND created_at_utc < ?
+            ORDER BY created_at_utc ASC, id ASC
+            """,
+            (user_id, start_utc, end_utc),
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -1817,8 +1842,9 @@ def update_time_entry(
         )
         conn.commit()
         try:
-            from sync_engine import notify_data_changed
+            from sync_engine import enqueue_time_entry_snapshot_by_id, notify_data_changed
 
+            enqueue_time_entry_snapshot_by_id(cfg, int(user_id), int(entry_id))
             notify_data_changed(cfg, local_user_id=int(user_id))
         except Exception:
             pass
@@ -1830,11 +1856,18 @@ def update_time_entry(
 def delete_time_entry(cfg: DbConfig, user_id: int, entry_id: int) -> bool:
     conn = connect(cfg)
     try:
+        row = conn.execute(
+            "SELECT client_uuid FROM rr_time_entries WHERE id = ? AND user_id = ?",
+            (entry_id, user_id),
+        ).fetchone()
+        client_uuid = str(row[0]).strip() if row and row[0] is not None else ""
         cur = conn.execute("DELETE FROM rr_time_entries WHERE id = ? AND user_id = ?", (entry_id, user_id))
         conn.commit()
         try:
-            from sync_engine import notify_data_changed
+            from sync_engine import enqueue_time_entry_delete_by_client_uuid, notify_data_changed
 
+            if client_uuid:
+                enqueue_time_entry_delete_by_client_uuid(cfg, int(user_id), client_uuid)
             notify_data_changed(cfg, local_user_id=int(user_id))
         except Exception:
             pass

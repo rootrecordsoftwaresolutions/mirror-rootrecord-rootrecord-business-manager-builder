@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,22 +202,25 @@ def insert_time_entry(
     created = now_utc_iso_text()
     conn = connect(cfg)
     try:
+        cid = str(uuid.uuid4())
         cur = conn.execute(
             """
             INSERT INTO rr_time_entries
-              (user_id, machine_session_id, start_utc, end_utc, category, description, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (user_id, machine_session_id, start_utc, end_utc, category, description, created_at, client_uuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, machine_session_id, start, end, category, description, created),
+            (user_id, machine_session_id, start, end, category, description, created, cid),
         )
+        eid = int(cur.lastrowid)
         conn.commit()
         try:
-            from sync_engine import notify_data_changed
+            from sync_engine import enqueue_time_entry_snapshot_by_id, notify_data_changed
 
+            enqueue_time_entry_snapshot_by_id(cfg, int(user_id), eid)
             notify_data_changed(cfg, local_user_id=int(user_id))
         except Exception:
             pass
-        return int(cur.lastrowid)
+        return eid
     finally:
         conn.close()
 
@@ -244,6 +248,7 @@ def insert_rich_time_entry(
     start = parse_iso_utc_to_storage(start_iso)
     end = parse_iso_utc_to_storage(end_iso)
     created = now_utc_iso_text()
+    cid = str(uuid.uuid4())
     conn = connect(cfg)
     try:
         cur = conn.execute(
@@ -251,8 +256,8 @@ def insert_rich_time_entry(
             INSERT INTO rr_time_entries
               (user_id, machine_session_id, start_utc, end_utc, category, description, created_at,
                work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency,
-               business_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               business_id, client_uuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -270,6 +275,7 @@ def insert_rich_time_entry(
                 amount_cents,
                 currency,
                 business_id,
+                cid,
             ),
         )
         eid = int(cur.lastrowid)
@@ -281,8 +287,9 @@ def insert_rich_time_entry(
                 )
         conn.commit()
         try:
-            from sync_engine import notify_data_changed
+            from sync_engine import enqueue_time_entry_snapshot_by_id, notify_data_changed
 
+            enqueue_time_entry_snapshot_by_id(cfg, int(user_id), eid)
             notify_data_changed(cfg, local_user_id=int(user_id))
         except Exception:
             pass
@@ -326,6 +333,106 @@ def insert_session_event(
         conn.close()
 
 
+def update_session_event_row(
+    cfg: DbConfig,
+    user_id: int,
+    event_id: int,
+    *,
+    created_at_utc: str | None = None,
+    detail: str | None = None,
+) -> bool:
+    """Adjust timestamp and/or detail for a Work Log session row (clock in/out, break, …)."""
+    if created_at_utc is None and detail is None:
+        return True
+    conn = connect(cfg)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM rr_session_events WHERE id = ? AND user_id = ?",
+            (int(event_id), int(user_id)),
+        ).fetchone()
+        if not row:
+            return False
+        sets: list[str] = []
+        vals: list[Any] = []
+        if created_at_utc is not None:
+            sets.append("created_at_utc = ?")
+            vals.append(parse_iso_utc_to_storage(created_at_utc))
+        if detail is not None:
+            sets.append("detail = ?")
+            vals.append(str(detail)[:5000])
+        vals.extend([int(event_id), int(user_id)])
+        conn.execute(
+            f"UPDATE rr_session_events SET {', '.join(sets)} WHERE id = ? AND user_id = ?",
+            vals,
+        )
+        conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
+        return True
+    finally:
+        conn.close()
+
+
+def delete_session_event_row(cfg: DbConfig, user_id: int, event_id: int) -> bool:
+    conn = connect(cfg)
+    try:
+        cur = conn.execute(
+            "DELETE FROM rr_session_events WHERE id = ? AND user_id = ?",
+            (int(event_id), int(user_id)),
+        )
+        conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def restore_session_event_row(
+    cfg: DbConfig,
+    user_id: int,
+    *,
+    event_id: int,
+    event_type: str,
+    detail: str,
+    created_at_utc: str,
+) -> bool:
+    """Undo delete: reinsert the same primary key (best-effort)."""
+    conn = connect(cfg)
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO rr_session_events (id, user_id, event_type, detail, created_at_utc)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(event_id),
+                int(user_id),
+                str(event_type)[:200],
+                str(detail)[:5000],
+                parse_iso_utc_to_storage(created_at_utc),
+            ),
+        )
+        conn.commit()
+        try:
+            from sync_engine import notify_data_changed
+
+            notify_data_changed(cfg, local_user_id=int(user_id))
+        except Exception:
+            pass
+        return True
+    finally:
+        conn.close()
+
+
 def list_registered_user_ids(cfg: DbConfig) -> list[int]:
     conn = connect(cfg)
     try:
@@ -351,7 +458,8 @@ def fetch_time_entries_for_user(
             cur = conn.execute(
                 """
                 SELECT id, user_id, machine_session_id, start_utc, end_utc, category, description, created_at,
-                       work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency
+                       work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency,
+                       business_id, client_uuid
                 FROM rr_time_entries
                 WHERE user_id = ?
                 ORDER BY start_utc ASC, id ASC
@@ -363,7 +471,8 @@ def fetch_time_entries_for_user(
             cur = conn.execute(
                 """
                 SELECT id, user_id, machine_session_id, start_utc, end_utc, category, description, created_at,
-                       work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency
+                       work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency,
+                       business_id, client_uuid
                 FROM rr_time_entries
                 WHERE user_id = ? AND start_utc >= ?
                 ORDER BY start_utc ASC, id ASC
@@ -372,6 +481,191 @@ def fetch_time_entries_for_user(
             )
         rows = cur.fetchall()
         return [_row_to_dict(cur, row) for row in rows]
+    finally:
+        conn.close()
+
+
+def fetch_time_entry_for_sync(cfg: DbConfig, user_id: int, entry_id: int) -> dict[str, Any] | None:
+    """Full row + tag_ids for cloud sync payloads (requires migration v19 client_uuid)."""
+    conn = connect(cfg)
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, user_id, machine_session_id, start_utc, end_utc, category, description, created_at,
+                   work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency,
+                   business_id, client_uuid
+            FROM rr_time_entries
+            WHERE id = ? AND user_id = ?
+            """,
+            (entry_id, user_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        d = _row_to_dict(cur, row)
+        tags = conn.execute(
+            "SELECT tag_id FROM time_entry_tags WHERE time_entry_id = ? ORDER BY tag_id",
+            (entry_id,),
+        ).fetchall()
+        d["tag_ids"] = [int(t[0]) for t in tags]
+        return d
+    finally:
+        conn.close()
+
+
+def _as_opt_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def upsert_time_entry_from_remote_sync_payload(
+    cfg: DbConfig,
+    user_id: int,
+    payload: dict[str, Any],
+) -> bool:
+    """
+    Apply a remote `time_entry` upsert (same shape as enqueue snapshot). Does not enqueue sync traffic.
+    """
+    client_uuid = str(payload.get("client_uuid") or "").strip()
+    if not client_uuid:
+        return False
+    start_utc = str(payload.get("start_utc") or "").strip()
+    end_utc = str(payload.get("end_utc") or "").strip()
+    if not start_utc or not end_utc:
+        return False
+    category = str(payload.get("category") or "work").strip().lower()
+    if category not in ("evaluation", "work"):
+        category = "work"
+    description = str(payload.get("description") or "")
+    created_raw = str(payload.get("created_at") or "").strip()
+    try:
+        created_at = parse_iso_utc_to_storage(created_raw) if created_raw else now_utc_iso_text()
+    except Exception:
+        created_at = now_utc_iso_text()
+    machine_session_id = _as_opt_int(payload.get("machine_session_id"))
+    work_category_id = _as_opt_int(payload.get("work_category_id"))
+    project_id = _as_opt_int(payload.get("project_id"))
+    notes = payload.get("notes")
+    notes_s = None if notes is None else str(notes)
+    billable = int(payload.get("billable") if payload.get("billable") is not None else 1)
+    hourly_rate_cents = _as_opt_int(payload.get("hourly_rate_cents"))
+    amount_cents = _as_opt_int(payload.get("amount_cents"))
+    currency = str(payload.get("currency") or "USD").strip() or "USD"
+    business_id = _as_opt_int(payload.get("business_id"))
+    tag_ids_raw = payload.get("tag_ids")
+    tag_ids: list[int] = []
+    if isinstance(tag_ids_raw, list):
+        for t in tag_ids_raw:
+            ti = _as_opt_int(t)
+            if ti is not None:
+                tag_ids.append(ti)
+
+    conn = connect(cfg)
+    try:
+        existing = conn.execute(
+            "SELECT id FROM rr_time_entries WHERE user_id = ? AND client_uuid = ?",
+            (int(user_id), client_uuid),
+        ).fetchone()
+        if existing:
+            eid = int(existing[0])
+            conn.execute(
+                """
+                UPDATE rr_time_entries SET
+                  machine_session_id = ?, start_utc = ?, end_utc = ?, category = ?, description = ?,
+                  created_at = ?, work_category_id = ?, project_id = ?, notes = ?, billable = ?,
+                  hourly_rate_cents = ?, amount_cents = ?, currency = ?, business_id = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    machine_session_id,
+                    parse_iso_utc_to_storage(start_utc),
+                    parse_iso_utc_to_storage(end_utc),
+                    category,
+                    description,
+                    created_at,
+                    work_category_id,
+                    project_id,
+                    notes_s,
+                    billable,
+                    hourly_rate_cents,
+                    amount_cents,
+                    currency,
+                    business_id,
+                    eid,
+                    int(user_id),
+                ),
+            )
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO rr_time_entries
+                  (user_id, machine_session_id, start_utc, end_utc, category, description, created_at,
+                   work_category_id, project_id, notes, billable, hourly_rate_cents, amount_cents, currency,
+                   business_id, client_uuid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(user_id),
+                    machine_session_id,
+                    parse_iso_utc_to_storage(start_utc),
+                    parse_iso_utc_to_storage(end_utc),
+                    category,
+                    description,
+                    created_at,
+                    work_category_id,
+                    project_id,
+                    notes_s,
+                    billable,
+                    hourly_rate_cents,
+                    amount_cents,
+                    currency,
+                    business_id,
+                    client_uuid,
+                ),
+            )
+            eid = int(cur.lastrowid)
+        conn.execute("DELETE FROM time_entry_tags WHERE time_entry_id = ?", (eid,))
+        for tid in tag_ids:
+            tag_ok = conn.execute(
+                "SELECT 1 FROM tags WHERE id = ? AND user_id = ?",
+                (tid, int(user_id)),
+            ).fetchone()
+            if not tag_ok:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO time_entry_tags (time_entry_id, tag_id) VALUES (?, ?)",
+                (eid, tid),
+            )
+        conn.commit()
+        return True
+    except Exception:
+        log.exception("upsert_time_entry_from_remote_sync_payload failed")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        conn.close()
+
+
+def delete_time_entry_by_client_uuid_for_sync(cfg: DbConfig, user_id: int, client_uuid: str) -> bool:
+    """Delete by stable sync id (remote delete). Does not enqueue."""
+    cu = (client_uuid or "").strip()
+    if not cu:
+        return False
+    conn = connect(cfg)
+    try:
+        cur = conn.execute(
+            "DELETE FROM rr_time_entries WHERE user_id = ? AND client_uuid = ?",
+            (int(user_id), cu),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

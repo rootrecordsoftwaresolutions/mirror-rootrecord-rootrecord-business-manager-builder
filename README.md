@@ -143,6 +143,14 @@ PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is gen
 
 ### Release history (builder)
 
+**1.3.45**
+
+- **Work Log:** Lists **session markers** (clock in/out, breaks, etc.) together with time blocks; click a `SESSION id=…` line to edit timestamp + detail or delete (with undo). Asset search for **About** includes `docs/assets` and extra filenames (`about.png`, …).
+
+**1.3.44**
+
+- **Cloud sync — time entries:** Migration **19** adds stable `client_uuid` on `rr_time_entries`; `sync_engine` pushes/pulls `time_entry` upserts/deletes (same Worker as sign-in). The Flutter companion under `mobile/rootrecord_business_manager` can show those rows and submit new ones.
+
 **1.3.43**
 
 - **Store / certification silent install:** `rootrecord.iss` — silent (`/VERYSILENT`) installs no longer leave Terms on “decline” by default; finish text documents launch + uninstall; extra Start-menu shortcut under Programs root; explicit `CreateUninstallRegKey=yes`; publisher string aligned to **Root Record** for ARP/Settings.

@@ -35,6 +35,8 @@ def iter_app_bundle_asset_dirs() -> list[Path]:
     if getattr(sys, "frozen", False):
         add(Path(sys.executable).resolve().parent)
     add(_PKG_DIR)
+    # Packaged / dev marketing & About images (see docs/assets/README.md)
+    add(_PKG_DIR / "docs" / "assets")
     return dirs
 
 
@@ -45,7 +47,7 @@ def resolve_shipped_asset(*names: str) -> Path | None:
     """
     for name in names:
         for d in iter_app_bundle_asset_dirs():
-            for candidate in (d / name, d / "branding" / name):
+            for candidate in (d / name, d / "branding" / name, d / "docs" / "assets" / name):
                 if candidate.is_file():
                     return candidate
     return None

@@ -78,6 +78,7 @@ from data_api import (
     list_quick_actions,
     recent_time_entries,
     list_time_entries_between,
+    list_session_events_between,
     list_work_categories,
     remove_finalized_range,
     save_quick_action,
@@ -98,12 +99,15 @@ from data_api import (
 )
 from db import (
     DbConfig,
+    delete_session_event_row,
+    restore_session_event_row,
     ensure_schema,
     insert_machine_session,
     insert_rich_time_entry,
     load_db_config,
     maybe_migrate_legacy_desktop_db,
     migrate_registered_users_from_json,
+    update_session_event_row,
     upsert_user,
 )
 from app_version import APP_VERSION
@@ -806,6 +810,9 @@ class RootRecordApp(ctk.CTk):
             "about_page_graphic.jpg",
             "about page grahic.jpg",
             "about page graphic.jpg",
+            "about.png",
+            "about.jpg",
+            "About.png",
         )
         if path is None:
             try:
@@ -6890,8 +6897,9 @@ fg_color=self._theme_help_btn_bg,
         ctk.CTkLabel(
             t,
             text=(
-                "Entries below are sorted by work start time. ID is assigned when the row is saved, "
-                "so backdated or manual blocks can have a higher ID than work logged later the same day."
+                "Entries below mix time blocks (from the timer) with session markers (clock in/out, breaks). "
+                "Click a line to edit: time rows use Start/End/Category/Project; session rows use Start as event time "
+                "and End is ignored. IDs: numeric = time entry; SESSION id=N = session marker."
             ),
             text_color=self._theme_text_muted,
             font=ctk.CTkFont(size=11),
@@ -6901,6 +6909,8 @@ fg_color=self._theme_help_btn_bg,
         self._cal_entries = ctk.CTkTextbox(t, height=260, font=ctk.CTkFont(family="Consolas", size=12))
         self._cal_entries.pack(fill="both", expand=True, pady=6)
         self._cal_entries.bind("<ButtonRelease-1>", self._on_calendar_entry_click)
+        self._worklog_edit_kind = "time"
+        self._worklog_edit_session_row = None
 
         edit = ctk.CTkFrame(t, fg_color="transparent")
         edit.pack(fill="x", pady=6)
@@ -6972,6 +6982,11 @@ fg_color=self._theme_help_btn_bg,
         rows = list_time_entries_between(self.cfg, self.uid, start, end)
         self._calendar_rows = rows
         self._calendar_rows_by_id = {int(r["id"]): r for r in rows}
+        try:
+            sess_rows = list_session_events_between(self.cfg, self.uid, start, end)
+        except Exception:
+            sess_rows = []
+        self._calendar_session_by_id = {int(r["id"]): r for r in sess_rows}
         breakdown = daily_task_breakdown(self.cfg, self.uid, start, end)
         iso_year, iso_week, _iso_weekday = d.isocalendar()
         self._cal_summary.delete("0.0", "end")
@@ -6989,15 +7004,31 @@ fg_color=self._theme_help_btn_bg,
             "\nTotals use unique time on the clock (overlapping rows are not double-counted).\n",
         )
         self._cal_entries.delete("0.0", "end")
+        merged: list[tuple[str, str, dict[str, Any]]] = []
         for r in rows:
-            label = ((r.get("category_name") or r.get("category") or "—").strip() or "—")[:24]
-            t0 = format_stored_utc_as_local(self.cfg, str(r["start_utc"]))
-            t1 = format_stored_utc_as_local(self.cfg, str(r["end_utc"]))
-            self._cal_entries.insert(
-                "end",
-                f"{t0} -> {t1}  · ID {int(r['id']):5}  "
-                f"{label:10}  {r['description']}\n",
-            )
+            merged.append((str(r.get("start_utc") or ""), "time", r))
+        for r in sess_rows:
+            merged.append((str(r.get("created_at_utc") or ""), "session", r))
+        merged.sort(key=lambda x: (x[0], 0 if x[1] == "time" else 1, int(x[2].get("id") or 0)))
+        for _sort_key, kind, r in merged:
+            if kind == "time":
+                label = ((r.get("category_name") or r.get("category") or "—").strip() or "—")[:24]
+                t0 = format_stored_utc_as_local(self.cfg, str(r["start_utc"]))
+                t1 = format_stored_utc_as_local(self.cfg, str(r["end_utc"]))
+                self._cal_entries.insert(
+                    "end",
+                    f"{t0} -> {t1}  · ID {int(r['id']):5}  "
+                    f"{label:10}  {r['description']}\n",
+                )
+            else:
+                t0 = format_stored_utc_as_local(self.cfg, str(r.get("created_at_utc") or ""))
+                et = str(r.get("event_type") or "event")[:14]
+                sid = int(r["id"])
+                detail = str(r.get("detail") or "").replace("\n", " ").strip()
+                self._cal_entries.insert(
+                    "end",
+                    f"{t0}  · {et:14}  · SESSION id={sid}  {detail}\n",
+                )
         self._refresh_lock_status()
         self._refresh_audit_panel()
         self._refresh_report_panel()
@@ -7008,7 +7039,16 @@ fg_color=self._theme_help_btn_bg,
             line = self._cal_entries.get(f"{idx} linestart", f"{idx} lineend")
         except Exception:
             return
-        m = re.search(r"\bID\s+(\d+)\b", line or "")
+        if not line:
+            return
+        ms = re.search(r"SESSION\s+id=(\d+)\b", line)
+        if ms:
+            sid = int(ms.group(1))
+            srow = getattr(self, "_calendar_session_by_id", {}).get(sid)
+            if srow:
+                self._load_session_into_editor(srow)
+            return
+        m = re.search(r"\bID\s+(\d+)\b", line)
         if not m:
             return
         rid = int(m.group(1))
@@ -7018,6 +7058,8 @@ fg_color=self._theme_help_btn_bg,
         self._load_row_into_editor(row)
 
     def _load_row_into_editor(self, row: dict[str, Any]) -> None:
+        self._worklog_edit_kind = "time"
+        self._worklog_edit_session_row = None
         self._edit_id.delete(0, "end")
         self._edit_id.insert(0, str(row.get("id") or ""))
         self._edit_start.delete(0, "end")
@@ -7032,6 +7074,23 @@ fg_color=self._theme_help_btn_bg,
         proj_name = str(row.get("project_name") or "").strip()
         self._edit_proj.set(proj_name if proj_name in getattr(self, "_edit_proj_map", {}) else "(none)")
         self._edit_hint.configure(text="")
+
+    def _load_session_into_editor(self, row: dict[str, Any]) -> None:
+        """Clock in/out and other rr_session_events rows (not rr_time_entries)."""
+        self._worklog_edit_kind = "session"
+        self._worklog_edit_session_row = dict(row)
+        self._edit_id.delete(0, "end")
+        self._edit_id.insert(0, f"session:{int(row.get('id') or 0)}")
+        self._edit_start.delete(0, "end")
+        self._edit_start.insert(0, format_stored_utc_as_local(self.cfg, str(row.get("created_at_utc") or "")))
+        self._edit_end.delete(0, "end")
+        self._edit_end.insert(0, format_stored_utc_as_local(self.cfg, str(row.get("created_at_utc") or "")))
+        self._edit_desc.delete(0, "end")
+        self._edit_desc.insert(0, str(row.get("detail") or ""))
+        self._edit_hint.configure(
+            text=f"Session marker ({row.get('event_type') or 'event'}): Start = event time; End is ignored. "
+            "Save updates timestamp + detail only.",
+        )
 
     def _parse_range_dates(self) -> tuple[datetime, datetime] | None:
         try:
@@ -7371,6 +7430,9 @@ fg_color=self._theme_help_btn_bg,
         if self._selected_range_locked():
             self._edit_hint.configure(text="This report range is locked. Unlock it before editing.")
             return
+        if getattr(self, "_worklog_edit_kind", "time") == "session":
+            self._update_session_day_entry()
+            return
         try:
             eid = int(self._edit_id.get().strip())
         except ValueError:
@@ -7416,9 +7478,64 @@ fg_color=self._theme_help_btn_bg,
         else:
             self._edit_hint.configure(text="Could not save. Another entry overlaps this time range.")
 
+    def _update_session_day_entry(self) -> None:
+        raw = self._edit_id.get().strip()
+        if not raw.startswith("session:"):
+            messagebox.showerror("RootRecord Business Manager", "Select a SESSION line from the list first.")
+            return
+        try:
+            sid = int(raw.split(":", 1)[1])
+        except ValueError:
+            messagebox.showerror("RootRecord Business Manager", "Invalid session selection.")
+            return
+        old = getattr(self, "_worklog_edit_session_row", None) or getattr(self, "_calendar_session_by_id", {}).get(sid)
+        if not old or int(old.get("id") or 0) != sid:
+            messagebox.showerror("RootRecord Business Manager", "Session row not found. Load day again.")
+            return
+        when_raw = self._edit_start.get().strip()
+        d_raw = self._edit_desc.get().strip()
+        if not when_raw:
+            self._edit_hint.configure(text="Start (event time) is required.")
+            return
+        try:
+            new_when = local_input_to_utc_naive_iso(self.cfg, when_raw)
+        except Exception:
+            self._edit_hint.configure(text="Use local date/time like 2026-04-08 13:45.")
+            return
+        old_when = str(old.get("created_at_utc") or "")
+        old_detail = str(old.get("detail") or "")
+        preview = (
+            f"Update session marker ({old.get('event_type') or 'event'})?\n\n"
+            f"Time: {old_when} -> {new_when}\n"
+            f"Detail: {old_detail!r} -> {d_raw!r}"
+        )
+        if not messagebox.askyesno("Confirm changes", preview):
+            return
+        ok = update_session_event_row(
+            self.cfg,
+            self.uid,
+            sid,
+            created_at_utc=new_when,
+            detail=d_raw,
+        )
+        if ok:
+            self._last_calendar_undo = {
+                "kind": "session_update",
+                "old": dict(old),
+                "new": {**dict(old), "created_at_utc": new_when, "detail": d_raw},
+            }
+            self._refresh_calendar()
+            self._refresh_dashboard()
+            self._edit_hint.configure(text="Session marker saved. Undo Last can revert.")
+        else:
+            self._edit_hint.configure(text="Could not save session marker.")
+
     def _delete_day_entry(self) -> None:
         if self._selected_range_locked():
             self._edit_hint.configure(text="This report range is locked. Unlock it before deleting.")
+            return
+        if getattr(self, "_worklog_edit_kind", "time") == "session":
+            self._delete_session_day_entry()
             return
         try:
             eid = int(self._edit_id.get().strip())
@@ -7438,7 +7555,63 @@ fg_color=self._theme_help_btn_bg,
         else:
             messagebox.showerror("RootRecord Business Manager", "Could not delete entry.")
 
+    def _delete_session_day_entry(self) -> None:
+        raw = self._edit_id.get().strip()
+        if not raw.startswith("session:"):
+            messagebox.showerror("RootRecord Business Manager", "Select a SESSION line from the list first.")
+            return
+        try:
+            sid = int(raw.split(":", 1)[1])
+        except ValueError:
+            messagebox.showerror("RootRecord Business Manager", "Invalid session selection.")
+            return
+        old = getattr(self, "_worklog_edit_session_row", None) or getattr(self, "_calendar_session_by_id", {}).get(sid)
+        if not old or int(old.get("id") or 0) != sid:
+            messagebox.showerror("RootRecord Business Manager", "Session row not found.")
+            return
+        if not messagebox.askyesno(
+            "RootRecord Business Manager",
+            "Delete this session marker from the log?\n\n"
+            "This removes the clock in/out / break line only. It does not delete time blocks (ID rows).",
+        ):
+            return
+        if delete_session_event_row(self.cfg, self.uid, sid):
+            self._last_calendar_undo = {"kind": "session_delete", "old": dict(old)}
+            self._refresh_calendar()
+            self._refresh_dashboard()
+            self._edit_hint.configure(text="Session marker deleted. Undo Last can restore.")
+        else:
+            messagebox.showerror("RootRecord Business Manager", "Could not delete session marker.")
+
     def _preview_day_entry_change(self) -> None:
+        if getattr(self, "_worklog_edit_kind", "time") == "session":
+            raw = self._edit_id.get().strip()
+            if not raw.startswith("session:"):
+                self._edit_hint.configure(text="Select a SESSION line first.")
+                return
+            try:
+                sid = int(raw.split(":", 1)[1])
+            except ValueError:
+                self._edit_hint.configure(text="Invalid session selection.")
+                return
+            old = getattr(self, "_worklog_edit_session_row", None) or getattr(self, "_calendar_session_by_id", {}).get(sid)
+            if not old:
+                self._edit_hint.configure(text="Session row not found.")
+                return
+            when_raw = self._edit_start.get().strip()
+            d_raw = self._edit_desc.get().strip()
+            if not when_raw:
+                self._edit_hint.configure(text="Start (event time) is required.")
+                return
+            try:
+                new_when = local_input_to_utc_naive_iso(self.cfg, when_raw)
+            except Exception:
+                self._edit_hint.configure(text="Use local date/time like 2026-04-08 13:45.")
+                return
+            self._edit_hint.configure(
+                text=f"Preview session {old.get('event_type')}: {old.get('created_at_utc')} -> {new_when}; detail -> {d_raw!r}",
+            )
+            return
         try:
             eid = int(self._edit_id.get().strip())
         except ValueError:
@@ -7558,6 +7731,35 @@ fg_color=self._theme_help_btn_bg,
                 insert_time_entry_audit(
                     self.cfg, self.uid, entry_id=eid, action="undo_update", old_row=undo.get("new"), new_row=old
                 )
+        elif kind == "session_update":
+            new = dict(undo.get("new") or {})
+            old = dict(undo.get("old") or {})
+            sid = int(old.get("id") or 0)
+            if sid <= 0:
+                return
+            ok = update_session_event_row(
+                self.cfg,
+                self.uid,
+                sid,
+                created_at_utc=str(old.get("created_at_utc") or ""),
+                detail=str(old.get("detail") or ""),
+            )
+            if not ok:
+                self._edit_hint.configure(text="Undo session update failed.")
+                return
+        elif kind == "session_delete":
+            old = dict(undo.get("old") or {})
+            sid = int(old.get("id") or 0)
+            if sid <= 0:
+                return
+            restore_session_event_row(
+                self.cfg,
+                self.uid,
+                event_id=sid,
+                event_type=str(old.get("event_type") or "event"),
+                detail=str(old.get("detail") or ""),
+                created_at_utc=str(old.get("created_at_utc") or ""),
+            )
         elif kind == "delete":
             old = dict(undo.get("old") or {})
             try:
@@ -7589,6 +7791,14 @@ fg_color=self._theme_help_btn_bg,
         self._edit_hint.configure(text="Undo applied.")
 
     def _cancel_day_entry_edit(self) -> None:
+        if getattr(self, "_worklog_edit_kind", "time") == "session":
+            row = getattr(self, "_worklog_edit_session_row", None)
+            if row:
+                self._load_session_into_editor(row)
+                self._edit_hint.configure(text="Reverted unsaved changes for selected session marker.")
+            else:
+                self._edit_hint.configure(text="Edit cleared.")
+            return
         try:
             eid = int(self._edit_id.get().strip())
         except ValueError:
