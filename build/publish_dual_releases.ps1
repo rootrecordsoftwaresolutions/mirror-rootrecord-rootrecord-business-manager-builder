@@ -219,9 +219,9 @@ if ($SkipBuild) {
 } else {
     Write-Host ""
     Write-Host "--- Build Windows installer ---" -ForegroundColor Cyan
-    $buildArgs = @()
-    if ($doSign) { $buildArgs += "-Sign" }
-    if (-not $SkipStopRunningApp) { $buildArgs += "-StopRunningApp" }
+    $buildArgs = @{}
+    if ($doSign) { $buildArgs.Sign = $true }
+    if (-not $SkipStopRunningApp) { $buildArgs.StopRunningApp = $true }
     & $buildScript @buildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "build_windows.ps1 failed."
@@ -241,12 +241,12 @@ if ((Invoke-GhReleaseExists $gh $DownloadRepo $tag)) {
         throw "Release $tag already exists on $DownloadRepo. Delete the release on GitHub, bump the version, or use -SkipDownloadIfReleaseExists."
     }
 } else {
-    $pubArgs = @(
-        "-Version", $version
-        "-InstallerPath", $installerPath
-        "-Repo", $DownloadRepo
-    )
-    if ($NoLatest) { $pubArgs += "-NoLatest" }
+    $pubArgs = @{
+        Version = $version
+        InstallerPath = $installerPath
+        Repo = $DownloadRepo
+    }
+    if ($NoLatest) { $pubArgs.NoLatest = $true }
     & $publishProductScript @pubArgs
     if ($LASTEXITCODE -ne 0) {
         throw "publish_product_release.ps1 failed."
