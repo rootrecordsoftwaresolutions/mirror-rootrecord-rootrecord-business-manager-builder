@@ -6,9 +6,9 @@
 
 **One calm workspace for time, money, clients, inventory, and reports - built for owners and operators who want clarity without living in a browser.**
 
-Current release: **1.3.43** (see **About & Help** in the app for the exact build on your device.)
+Current release: **1.3.45** (see **About & Help** in the app for the exact build on your device.)
 
-**What’s new in 1.3.43:** The Windows installer now completes correctly for **silent / automated installs** (the kind Microsoft uses in certification). That means the app shows up in **Start** with a clear shortcut, appears under **Settings → Apps** for removal, and the finish screen explains how to open and uninstall the program. **1.3.42** improvements (full app signing for strict Windows security) are unchanged.
+**What’s new in 1.3.45:** **Time entries** can sync reliably across devices with a stable **client UUID** (database migration 19). The **sync engine** and local database paths handle enqueue, pull, and CRUD for time rows consistently. **Work log** session handling and related UI improvements in the main window. **1.3.43** installer behavior (silent installs, Start shortcut, Apps list, finish screen) and **1.3.42** full app signing remain in place.
 
 **[Download the Windows installer (latest release)](https://github.com/RootRecord/rootrecord-business-manager-download/releases/latest)**
 
@@ -259,6 +259,6 @@ For **how-to** detail that mirrors the buttons in the app, open **About & Help -
 ![RootRecord product mark](assets/github-icon.jpg)
 
 © RootRecord. All rights reserved.  
-*RootRecord Business Manager*  | Release documentation **v1.3.43**
+*RootRecord Business Manager*  | Release documentation **v1.3.45**
 
 </div>
