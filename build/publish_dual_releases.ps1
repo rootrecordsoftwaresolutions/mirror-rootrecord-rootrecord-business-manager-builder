@@ -62,8 +62,16 @@ function Get-DownloadRepoRoot([string] $packageRoot) {
 }
 
 function Invoke-GhReleaseExists([string] $Gh, [string] $Repo, [string] $Tag) {
-    & $Gh release view $Tag --repo $Repo 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    $oldEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Gh release view $Tag --repo $Repo *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
 }
 
 function Copy-PublicSyncToDownload([string] $syncOutRoot, [string] $downloadRoot) {
