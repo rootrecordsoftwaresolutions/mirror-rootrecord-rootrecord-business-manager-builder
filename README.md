@@ -145,6 +145,10 @@ PyInstaller’s **Windows** file version block in `build_rootrecord.spec` is gen
 
 ### Release history (builder)
 
+**1.3.46**
+
+- **Release tooling hardening:** Publish/build launchers now default to **signed** Windows output (`-Sign -StopRunningApp`) and dual-publish automation signs by default (opt out with `nosign` / `-NoSign` for local-only test builds).
+
 **1.3.45**
 
 - **Work Log:** Lists **session markers** (clock in/out, breaks, etc.) together with time blocks; click a `SESSION id=…` line to edit timestamp + detail or delete (with undo). Asset search for **About** includes `docs/assets` and extra filenames (`about.png`, …).
